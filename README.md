@@ -62,4 +62,3 @@ API를 호출하는 방식이 아니라, 실제 사용자가 하는 클릭·입�
 | [sidepanel.html](sidepanel.html) / [sidepanel.css](sidepanel.css) / [sidepanel.js](sidepanel.js) | 입력 UI·소재 데이터 조립·규격 검증 |
 | [background.js](background.js) | 탭 오케스트레이션·이미지 보관·업로드 동시성 제어 |
 | [content.js](content.js) | GFA 페이지 DOM 자동 조작 (입력·업로드·다이얼로그 처리) |
-| [sample.csv](sample.csv) | 소재 데이터 예시 |
