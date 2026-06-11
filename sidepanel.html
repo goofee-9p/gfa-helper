@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>GFA 소재 세팅하는 고라니</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <img src="고라니 48.png" alt="" class="brand-icon" />
+      <div class="brand-title">
+        <h1>GFA 소재 세팅하는 고라니</h1>
+        <div class="brand-sub">Zinus · GFA Manager Helper</div>
+      </div>
+      <span class="brand-version">v3</span>
+    </div>
+  </header>
+
+  <!-- ============== 프로모션 컨텍스트 ============== -->
+  <section class="step">
+    <div class="step-label">A. 프로모션 컨텍스트<button type="button" class="step-reset" data-reset="a" title="기본값으로 초기화" aria-label="초기화"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><polyline points="21 3 21 8 16 8"/></svg></button></div>
+    <label class="row"><span>프로모션명</span><input type="text" id="promoName" value="260000-00_프로모션명" placeholder="260000-00_프로모션명" /></label>
+    <input type="hidden" id="promoDate" value="" />
+    <label class="row"><span>프로모션 코드</span><input type="text" id="promoCode" value="promotion_260000-00" placeholder="promotion_260000-00" /></label>
+    <label class="row"><span>공통 랜딩 URL</span><input type="text" id="landingUrl" placeholder="https://brand.naver.com/zinus/.../id=500277" /></label>
+    <label class="check-row"><input type="checkbox" id="useNtParams" checked /><span>nt 파라미터 설정하기</span></label>
+  </section>
+
+  <input type="hidden" id="activeChannel" value="native" />
+  <input type="hidden" id="smartHeight" value="280" />
+  <input type="hidden" id="preset" value="native-group" />
+  <input type="hidden" id="profileName" value="지누스" />
+
+  <section class="step">
+    <div class="channel-tabs" role="tablist">
+      <button type="button" class="channel-tab active" data-channel="native">네이티브</button>
+      <button type="button" class="channel-tab" data-channel="smart">스마트채널</button>
+      <button type="button" class="channel-tab" data-channel="shopping">쇼핑프로모션</button>
+    </div>
+  </section>
+
+  <div class="channel-panel active" data-panel="native">
+    <section class="step">
+      <div class="step-label">B. 네이티브 광고그룹 정보<button type="button" class="step-reset" data-reset="b" title="기본값으로 초기화" aria-label="초기화"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><polyline points="21 3 21 8 16 8"/></svg></button></div>
+      <div class="url-row">
+        <input type="text" id="urlInput" placeholder="현재 GFA 네이티브 소재 URL" />
+        <button id="captureUrlBtn" class="primary small">캡처</button>
+      </div>
+      <div class="row-2">
+        <label><span>목적</span>
+          <select id="purpose">
+            <option value="">선택하기</option>
+            <option value="트래픽">트래픽(유입)</option>
+            <option value="전환">전환</option>
+          </select>
+        </label>
+        <label><span>타겟</span><select id="target"></select></label>
+      </div>
+      <label><span>배너 조합</span>
+        <select id="bannerCombo">
+          <option value="discount1-discount2">할인1 + 할인2</option>
+          <option value="discount1-gift1">할인1 + 사은1</option>
+          <option value="gift1-gift2">사은1 + 사은2</option>
+        </select>
+      </label>
+    </section>
+
+    <section class="step">
+      <div class="step-label">C. 네이티브 CTA 슬롯<button type="button" class="step-reset" data-reset="c" title="기본값으로 초기화" aria-label="초기화"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><polyline points="21 3 21 8 16 8"/></svg></button></div>
+      <div class="hint">이미지 배너 소재 2개에만 적용됩니다.</div>
+      <div class="cta-slot">
+        <label><span>슬롯 1 텍스트</span><input type="text" id="cta1" maxlength="15" value="지누스 6월 이벤트" placeholder="지누스 6월 이벤트" /></label>
+        <small class="charcount" data-for="cta1">0/15</small>
+      </div>
+      <div class="cta-slot">
+        <label><span>슬롯 2 텍스트</span><input type="text" id="cta2" maxlength="15" value="지누스가 JUNE비한 이벤트" placeholder="지누스가 JUNE비한 이벤트" /></label>
+        <small class="charcount" data-for="cta2">0/15</small>
+      </div>
+      <div class="cta-slot">
+        <label><span>슬롯 3 텍스트</span><input type="text" id="cta3" maxlength="15" value="최대 할인 + 사은품 증정" placeholder="최대 할인 + 사은품 증정" /></label>
+        <small class="charcount" data-for="cta3">0/15</small>
+      </div>
+    </section>
+  </div>
+
+  <div class="channel-panel" data-panel="smart">
+    <section class="step">
+      <div class="step-label">B. 스마트채널 광고그룹 정보<button type="button" class="step-reset" data-reset="b" title="기본값으로 초기화" aria-label="초기화"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><polyline points="21 3 21 8 16 8"/></svg></button></div>
+      <div class="url-row">
+        <input type="text" id="smartUrlInput" placeholder="현재 GFA 스마트채널 소재 URL" />
+        <button id="smartCaptureUrlBtn" class="primary small">캡처</button>
+      </div>
+      <div class="row-2">
+        <label><span>목적</span>
+          <select id="smartPurpose">
+            <option value="">선택하기</option>
+            <option value="트래픽">트래픽(유입)</option>
+            <option value="전환">전환</option>
+          </select>
+        </label>
+        <label><span>타겟</span><select id="smartTarget"></select></label>
+      </div>
+    </section>
+
+    <section class="step">
+      <div class="step-label">C. 스마트채널 소재 개수<button type="button" class="step-reset" data-reset="c" title="기본값으로 초기화" aria-label="초기화"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><polyline points="21 3 21 8 16 8"/></svg></button></div>
+      <div class="row-3">
+        <label><span>할인</span><input type="number" id="smartDiscountCount" min="0" max="15" value="3" /></label>
+        <label><span>사은</span><input type="number" id="smartGiftCount" min="0" max="15" value="3" /></label>
+        <label><span>USP</span><input type="number" id="smartUspCount" min="0" max="15" value="3" /></label>
+      </div>
+      <div class="hint">입력한 개수만큼 슬롯이 생성됩니다.</div>
+    </section>
+  </div>
+
+  <div class="channel-panel" data-panel="shopping">
+    <section class="step">
+      <div class="step-label">B. 쇼핑프로모션 광고그룹 정보<button type="button" class="step-reset" data-reset="b" title="기본값으로 초기화" aria-label="초기화"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><polyline points="21 3 21 8 16 8"/></svg></button></div>
+      <div class="url-row">
+        <input type="text" id="shoppingUrlInput" placeholder="현재 GFA 쇼핑프로모션 소재 URL" />
+        <button id="shoppingCaptureUrlBtn" class="primary small">캡처</button>
+      </div>
+      <div class="row-2">
+        <label><span>목적</span>
+          <select id="shoppingPurpose" disabled>
+            <option value="전환" selected>전환 (고정)</option>
+          </select>
+        </label>
+        <label><span>타겟</span><select id="shoppingTarget"></select></label>
+      </div>
+      <label><span>배너 조합</span>
+        <select id="shoppingBannerCombo">
+          <option value="discount-discount">할인 + 할인</option>
+          <option value="discount-gift">할인 + 사은</option>
+          <option value="gift-gift">사은 + 사은</option>
+        </select>
+      </label>
+      <div class="hint">이미지 2개 등록 → GFA가 PC/모바일로 분할해 자동으로 4개 소재 생성</div>
+    </section>
+
+    <section class="step">
+      <div class="step-label">C. 쇼핑프로모션 행동 유도<button type="button" class="step-reset" data-reset="c" title="기본값으로 초기화" aria-label="초기화"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><polyline points="21 3 21 8 16 8"/></svg></button></div>
+      <label><span>행동 유도 버튼</span>
+        <select id="shoppingCta">
+          <option value="더 알아보기">더 알아보기</option>
+          <option value="라이브 보기">라이브 보기</option>
+        </select>
+      </label>
+    </section>
+  </div>
+
+  <section class="step">
+    <div class="step-label" id="copySectionLabel"><span id="copySectionText">D. 공통 카피</span><button type="button" class="step-reset" data-reset="d" title="기본값으로 초기화" aria-label="초기화"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><polyline points="21 3 21 8 16 8"/></svg></button></div>
+    <div class="hint">현재 선택한 탭의 소재에 적용됩니다.</div>
+    <label><textarea id="copy" rows="2" placeholder="예: 최대 22% 할인 + 쿠폰까지!"></textarea></label>
+  </section>
+
+  <section class="step">
+    <div class="step-label">E. 광고 이미지 파일<span id="imageSizeGuide" class="size-guide"></span></div>
+    <div id="imageDropZone" class="drop-zone">
+      <input type="file" id="imageFileInput" accept="image/png,image/jpeg" multiple hidden />
+      <div class="drop-copy">
+        <strong>이미지 한번에 드롭</strong>
+      </div>
+      <div class="drop-actions">
+        <button id="chooseImagesBtn" class="ghost small" type="button">파일 선택</button>
+        <button id="clearImagesBtn" class="ghost small danger" type="button">초기화</button>
+      </div>
+      <div class="smart-import-actions">
+        <button id="importSmart160Btn" class="ghost small smart-import" type="button">750×160 불러오기</button>
+        <button id="importSmart280Btn" class="ghost small smart-import" type="button">750×280 불러오기</button>
+      </div>
+    </div>
+    <div class="hint">각 슬롯을 클릭하거나 파일을 드롭하면 해당 소재 이미지로 지정됩니다.</div>
+    <div id="imageMatchList" class="image-match-list"></div>
+  </section>
+
+  <section class="step preview" id="previewSection">
+    <div class="step-label">F. 자동 생성 미리보기 <span id="previewCount" class="count-pill">0개</span></div>
+    <div id="previewList" class="preview-list"></div>
+  </section>
+
+  <section class="step">
+    <button id="openBatchBtn" class="primary big" disabled>소재 Set</button>
+    <button id="saveOpenedBtn" class="primary big secondary-action" type="button">열린 소재 저장</button>
+  </section>
+
+  <footer>
+    <details>
+      <summary>도움말</summary>
+      <ol class="help">
+        <li>GFA에서 광고그룹 만들고 "소재 등록" 화면 진입</li>
+        <li>B의 "캡처" 버튼으로 현재 URL 저장</li>
+        <li>A·C·D 입력 (한 번 채우면 다음 광고그룹 작업 시 유지)</li>
+        <li>E에서 생성될 소재 8개 미리보기 확인</li>
+        <li>"탭 일괄 열기" → 각 탭이 자동입력</li>
+        <li>탭마다 이미지 업로드(권장 사이즈는 우상단 패널에 표시) + 저장</li>
+        <li>다음 광고그룹은 B 정보만 갈아끼우고 반복</li>
+      </ol>
+    </details>
+  </footer>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

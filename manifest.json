@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "GFA 소재 세팅하는 고라니",
+  "version": "0.1.0",
+  "description": "네이버 GFA 소재 등록 시 텍스트/URL 자동입력 및 이미지 경로 관리 보조",
+  "permissions": ["storage", "sidePanel", "activeTab", "scripting", "clipboardWrite", "tabs"],
+  "host_permissions": [
+    "https://ads.naver.com/*",
+    "https://gfa.naver.com/*",
+    "file:///*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "고라니 16.png",
+    "48": "고라니 48.png",
+    "128": "고라니 128.png"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "GFA 소재 세팅하는 고라니",
+    "default_icon": {
+      "16": "고라니 16.png",
+      "48": "고라니 48.png",
+      "128": "고라니 128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://ads.naver.com/*", "https://gfa.naver.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
