@@ -22,6 +22,7 @@ const PRESETS = {
 const TARGET_TO_ABBREV = {
   '맞춤타겟': '맞춤타겟',
   '고객여정+알림받기타겟': '고객여정+알림받기타겟',
+  '관심사+구매의도': '관심사+구매의도',
   'CRM유사타겟': 'CRM유사타겟',
   '리타겟': '리타겟',
 };
@@ -29,12 +30,13 @@ const TARGET_TO_ABBREV = {
 const TARGET_TO_NT_KEYWORD = {
   '맞춤타겟': 'custom_image',
   '고객여정+알림받기타겟': 'notify_image',
+  '관심사+구매의도': 'interest_image',
   'CRM유사타겟': 'lookalike_image',
   '리타겟': 're_image',
 };
 
 const TARGET_OPTIONS_BY_PURPOSE = {
-  '트래픽': ['맞춤타겟', '고객여정+알림받기타겟'],
+  '트래픽': ['맞춤타겟', '고객여정+알림받기타겟', '관심사+구매의도'],
   '전환': ['CRM유사타겟', '리타겟'],
 };
 

@@ -55,14 +55,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'importSmartEditor') {
     (async () => {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab?.id || !/^file:\/\/.*smartchannel_editor_.*\.html/i.test(tab.url || '')) {
-        sendResponse({ ok: false, error: '스마트채널 에디터 HTML 탭을 활성화한 뒤 다시 시도하세요.' });
+      const url = tab?.url || '';
+      const isLocalSmartEditor = /^file:\/\/.*smartchannel_editor_.*\.html/i.test(url);
+      const isBannerEditorApp = /^https:\/\/banner-editor-xi\.vercel\.app\//i.test(url);
+      if (!tab?.id || (!isLocalSmartEditor && !isBannerEditorApp)) {
+        sendResponse({ ok: false, error: '스마트채널 에디터 탭을 활성화한 뒤 다시 시도하세요.' });
         return;
       }
 
       const height = Number(msg.height) || 280;
-      const [{ result } = {}] = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
+      const frameResults = await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
         world: 'MAIN',
         func: (h) => {
           try {
@@ -106,7 +109,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         },
         args: [height],
       });
-      sendResponse(result || { ok: false, error: '에디터에서 응답이 없습니다.' });
+      const result = frameResults.find((frame) => frame.result?.ok)?.result
+        || frameResults.find((frame) => frame.result?.error)?.result;
+      sendResponse(result || { ok: false, error: '스마트채널 에디터 iframe에서 소재를 찾지 못했습니다.' });
     })().catch((e) => sendResponse({ ok: false, error: e?.message || String(e) }));
     return true;
   }
