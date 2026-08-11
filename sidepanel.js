@@ -19,6 +19,20 @@ const PRESETS = {
   },
 };
 
+// 네이티브 배너형 — 소재 유형을 배너형(모바일)+배너형(PC)로만 남기는 신규 슬롯.
+// 저장 시 GFA가 소재명 뒤에 _배너형(PC) / _배너형(모바일)을 자동으로 붙이므로 suffix는 비워둔다.
+const NATIVE_BANNER_ROWS = [
+  { 혜택: '할인', sizeLabel: '배너형', suffix: '', type: 'native-image', imgSize: '342×228', ctaSlots: false, bannerTemplate: true },
+  { 혜택: '사은', sizeLabel: '배너형', suffix: '', type: 'native-image', imgSize: '342×228', ctaSlots: false, bannerTemplate: true },
+];
+
+function getNativePreset() {
+  const base = PRESETS['native-group'];
+  const rows = base.rows.slice();
+  if ($('includeBannerType')?.checked) rows.push(...NATIVE_BANNER_ROWS);
+  return { ...base, rows };
+}
+
 const TARGET_TO_ABBREV = {
   '맞춤타겟': '맞춤타겟',
   '고객여정+알림받기타겟': '고객여정+알림받기타겟',
@@ -94,7 +108,19 @@ const STATE_KEYS = ['activeChannel', 'promoName', 'promoDate', 'promoCode', 'lan
   'smartUrlInput', 'smartPurpose', 'smartTarget', 'smartDiscountCount', 'smartGiftCount', 'smartUspCount', 'smartHeight',
   'shoppingUrlInput', 'shoppingPurpose', 'shoppingTarget', 'shoppingBannerCombo', 'shoppingCta',
   'cta1', 'cta2', 'cta3',
+  'includeBannerType', 'bannerAdCopy', 'bannerDesc1', 'bannerDesc2', 'bannerDesc3',
+  'bannerLongDesc1', 'bannerLongDesc2',
   'copy'];
+
+// 네이티브 배너형 전용 문구 — 사이드패널 입력 id ↔ 페이로드 키
+const BANNER_TEXT_FIELDS = [
+  { id: 'bannerAdCopy', key: '광고문구' },
+  { id: 'bannerDesc1', key: '설명문구1' },
+  { id: 'bannerDesc2', key: '설명문구2' },
+  { id: 'bannerDesc3', key: '설명문구3' },
+  { id: 'bannerLongDesc1', key: '긴설명문구1' },
+  { id: 'bannerLongDesc2', key: '긴설명문구2' },
+];
 
 function getFieldValue(el) {
   return el.type === 'checkbox' ? el.checked : el.value;
@@ -370,7 +396,7 @@ function getActiveConfig() {
     urlInputId: 'urlInput',
     purpose: $('purpose')?.value || '',
     target: $('target')?.value || '',
-    preset: PRESETS['native-group'],
+    preset: getNativePreset(),
   };
 }
 
@@ -456,6 +482,12 @@ function buildPayloads() {
       base['광고문구'] = copy;
       base['행동유도'] = shoppingCta; // "더 알아보기" or "라이브 보기"
       base['쇼핑프로모션'] = true;
+    } else if (row.bannerTemplate) {
+      // 네이티브 배너형: 칩을 배너형(모바일)+배너형(PC)로 맞추고 전용 문구를 채움
+      base['배너형'] = true;
+      BANNER_TEXT_FIELDS.forEach(({ id, key }) => {
+        base[key] = $(id)?.value.trim() || '';
+      });
     } else if (row.type === 'image-banner') {
       base['안내문구'] = copy;
       if (row.ctaSlots) base['ctaSlots'] = ctas;
@@ -514,6 +546,8 @@ function getImageRule(sizeLabel) {
     '1200x628':  { min: 50 * 1024,  max: 500 * 1024,        label: '1200×628',  range: '50KB 이상, 500KB 이하' },
     '1200x1200': { min: 80 * 1024,  max: 800 * 1024,        label: '1200×1200', range: '80KB 이상, 800KB 이하' },
     '1200x1800': { min: 100 * 1024, max: 1.2 * 1024 * 1024, label: '1200×1800', range: '100KB 이상, 1.2MB 이하' },
+    // 네이티브 배너형
+    '342x228':   { min: 10 * 1024,  max: 130 * 1024,        label: '342×228',   range: '10KB 이상, 130KB 이하' },
     // 쇼핑프로모션
     '750x500':   { min: 20 * 1024,  max: 500 * 1024,        label: '750×500',   range: '20KB 이상, 500KB 이하' },
   };
@@ -680,6 +714,7 @@ function updateImageMatchList() {
     row.draggable = !!asset;
     const typeLabel = p['스마트채널']
       ? '스마트채널'
+      : p['배너형'] ? '네이티브 배너형'
       : p['소재타입'] === 'image-banner' ? '이미지 배너' : '네이티브';
     const displaySize = p['스마트채널'] ? '750×280 / 750×160' : p['이미지사이즈'];
     const assetMeta = asset
@@ -727,16 +762,18 @@ function updatePreview() {
     row.className = 'preview-row';
     const isImageBanner = p['소재타입'] === 'image-banner';
     const isShopping = !!p['쇼핑프로모션'];
+    const isBannerTemplate = !!p['배너형'];
     const hasCta = Array.isArray(p['ctaSlots']);
-    const badgeLabel = isShopping ? 'SP' : p['스마트채널'] ? 'SC' : isImageBanner ? 'IB' : 'NI';
-    const badgeClass = isShopping ? 'shopping' : p['스마트채널'] ? 'smart' : isImageBanner ? 'banner' : 'native';
+    const badgeLabel = isShopping ? 'SP' : p['스마트채널'] ? 'SC' : isBannerTemplate ? 'NB' : isImageBanner ? 'IB' : 'NI';
+    const badgeClass = isShopping ? 'shopping' : p['스마트채널'] ? 'smart' : isBannerTemplate ? 'nativebanner' : isImageBanner ? 'banner' : 'native';
     const tooltip = isShopping ? '쇼핑프로모션 (PC+모바일 자동 분할)'
       : p['스마트채널'] ? '스마트채널 이미지'
+      : isBannerTemplate ? '네이티브 배너형 (모바일+PC, 소재명 접미사 GFA 자동 부착)'
       : isImageBanner ? (hasCta ? '이미지 배너 + CTA 슬롯' : '이미지 배너')
       : '네이티브 이미지 (CTA 기본값 유지)';
     row.innerHTML = `
       <span class="type-badge ${badgeClass}" title="${tooltip}">${badgeLabel}${hasCta ? '+' : ''}</span>
-      <span class="name">${escapeHtml(p['소재명'])}</span>
+      <span class="name">${escapeHtml(p['소재명'])}${isBannerTemplate ? '<em class="auto-suffix">_배너형(PC)/(모바일)</em>' : ''}</span>
       <span class="size">${escapeHtml(p['이미지사이즈'])}</span>
     `;
     list.appendChild(row);
@@ -1032,13 +1069,16 @@ function resetSection(section) {
     } else if (channel === 'shopping') {
       if ($('shoppingCta')) $('shoppingCta').value = '더 알아보기';
     }
+  } else if (section === 'c2') {
+    if ($('includeBannerType')) $('includeBannerType').checked = true;
+    BANNER_TEXT_FIELDS.forEach(({ id }) => { if ($(id)) $(id).value = ''; });
   } else if (section === 'd') {
     $('copy').value = buildDefaultCopy();
   }
   updateCharCounts();
   updatePreview();
   saveState();
-  const labels = { a: 'A', b: 'B', c: 'C', d: 'D' };
+  const labels = { a: 'A', b: 'B', c: 'C', c2: 'C-2', d: 'D' };
   setStatus(`${labels[section]} 섹션 기본값으로 초기화됨`);
 }
 

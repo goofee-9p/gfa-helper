@@ -433,6 +433,7 @@
   async function fillProfileName(value) {
     if (!value) return null;
     const el = document.querySelector('input[name="profileName"]')
+            || document.querySelector('input[path="$.profile.name"]')
             || document.querySelector('input[name="profile"]')
             || findInputByKeyword(['프로필.*이름', '프로필명']);
     if (el) {
@@ -987,12 +988,25 @@
   // Fill NATIVE IMAGE form
   // ============================================================
   async function fillNativeImage(d) {
-    const results = await fillCommonFields(d);
     const isShopping = !!d['쇼핑프로모션'];
+    const isBannerTemplate = !!d['배너형'];
+
+    // 배너형은 칩 구성에 따라 설명 문구 입력칸이 새로 렌더링되므로 텍스트 입력 전에 칩부터 확정
+    const earlyChipResult = isBannerTemplate
+      ? await ensureCreativeTemplates(BANNER_TEMPLATE_LABELS)
+      : null;
+
+    const results = await fillCommonFields(d);
 
     if (isShopping) {
       // 쇼핑프로모션: 칩(배너형 모바일/PC)을 유지함 — 제거 X
       results['소재유형정리'] = { removed: [], failed: [], skipped: '쇼핑프로모션 (칩 유지)' };
+    } else if (isBannerTemplate) {
+      // 네이티브 배너형: 피드형 등 다른 칩 제거 → 배너형(모바일)+배너형(PC)만 남김
+      results['소재유형정리'] = earlyChipResult;
+      const chipError = earlyChipResult?.error
+        || (earlyChipResult?.missing?.length ? `배너형 칩 없음: ${earlyChipResult.missing.join(', ')}` : '');
+      if (chipError) results['소재유형정리오류'] = chipError;
     } else {
       // 네이티브 그룹: 칩 제거 → 피드형만 남김
       const chipResult = await removeChips(['배너형 (모바일)', '배너형(모바일)', '배너형 (PC)', '배너형(PC)']);
@@ -1002,8 +1016,10 @@
       }
     }
 
-    // 광고 문구 — name 모르겠으니 휴리스틱
-    const copyEl = findInputByKeyword(['광고.*문구', '소재.*문구', '본문']);
+    // 광고 문구 — ads.naver.com에서는 textarea[name="creativeMessage"]
+    const copyEl = document.querySelector('textarea[name="creativeMessage"]')
+                || document.querySelector('input[name="creativeMessage"]')
+                || findInputByKeyword(['광고.*문구', '소재.*문구', '본문']);
     if (copyEl && d['광고문구']) {
       setReactValue(copyEl, d['광고문구']);
       flashEl(copyEl);
@@ -1012,6 +1028,11 @@
       results['광고문구'] = null;
     } else {
       results['광고문구'] = false;
+    }
+
+    // 배너형 전용 — 설명 문구1~3 / PC 배너형 긴 설명문구 1~2
+    if (isBannerTemplate) {
+      results['배너형문구'] = await fillBannerTexts(d);
     }
 
     const adImageResult = await selectAdImage(d);
@@ -1164,6 +1185,181 @@
         (chip.querySelector('.ad-cms-select-selection-item-content')?.textContent || '').trim())
       .filter(isTargetChip);
     return { removed, failed, remaining };
+  }
+
+  // ============================================================
+  // 소재 유형 칩을 지정한 구성으로 맞추기 (없으면 추가, 나머지는 제거)
+  // 네이티브 배너형: 배너형(모바일) + 배너형(PC)만 남기고 피드형 등은 전부 제거
+  // ============================================================
+  const BANNER_TEMPLATE_LABELS = ['배너형 (모바일)', '배너형 (PC)'];
+
+  const normalizeChipLabel = (s) => (s || '').replace(/\s+/g, '').replace(/[()（）]/g, '').trim();
+
+  // 칩/옵션 텍스트에 부가 문구가 붙어도 매칭되도록 (배너형모바일 ≠ 배너형PC 라 오탐 없음)
+  const chipLabelMatches = (candidate, label) => {
+    const a = normalizeChipLabel(candidate);
+    const b = normalizeChipLabel(label);
+    return !!a && !!b && (a === b || a.includes(b));
+  };
+
+  function findTemplateSelect() {
+    return document.querySelector('.ad-cms-select[name="checkedTemplates"]')
+      || document.getElementById('$.checkedTemplates')?.querySelector('.ad-cms-select')
+      || document.querySelector('.ad-cms-select-multiple')
+      || null;
+  }
+
+  function getTemplateChips(select) {
+    return Array.from((select || document).querySelectorAll('.ad-cms-select-selection-item')).map(el => ({
+      el,
+      title: el.getAttribute('title')
+        || (el.querySelector('.ad-cms-select-selection-item-content')?.textContent || '').trim(),
+    }));
+  }
+
+  async function ensureCreativeTemplates(keepLabels) {
+    const select = findTemplateSelect();
+    if (!select) return { removed: [], added: [], failed: [], missing: keepLabels.slice(), error: '소재 유형 셀렉트 못찾음' };
+
+    const removed = [];
+    const added = [];
+    const failed = [];
+
+    // 0) 이 광고그룹이 배너형을 지원하는지 먼저 확인.
+    //    지원 안 하는데 기존 칩부터 지우면 소재 유형이 0개가 돼 폼이 망가짐.
+    const available = await listTemplateOptions(select);
+    if (available.length) {
+      const missingOptions = keepLabels.filter(label =>
+        !available.some(opt => chipLabelMatches(opt, label)));
+      if (missingOptions.length === keepLabels.length) {
+        return {
+          removed: [], added: [], failed: [], missing: keepLabels.slice(),
+          error: `이 광고그룹에 배너형 소재 유형이 없습니다 (선택 가능: ${available.join(', ')})`,
+        };
+      }
+    }
+
+    // 1) keep 목록에 없는 칩 제거 (한 번에 하나씩 — 제거하면 확인 다이얼로그 + DOM 재배열)
+    for (let round = 0; round < 12; round++) {
+      const extra = getTemplateChips(select)
+        .find(c => !keepLabels.some(label => chipLabelMatches(c.title, label)));
+      if (!extra) break;
+      const removeBtn = extra.el.querySelector(
+        '.ad-cms-select-selection-item-remove, [aria-label="close"], [aria-label="Close"], .anticon-close'
+      );
+      if (!removeBtn) {
+        failed.push(`${extra.title} (X 버튼 없음)`);
+        break; // 못 지우면 같은 칩이 계속 걸려 무한루프
+      }
+      lastChipRemoveAt = Date.now(); // 구성 변경 다이얼로그 자동 확인 가드
+      clickLikeUser(removeBtn);
+      removed.push(extra.title);
+      await sleep(750);
+    }
+
+    // 2) 빠진 칩 추가
+    for (const label of keepLabels) {
+      if (getTemplateChips(select).some(c => chipLabelMatches(c.title, label))) continue;
+      if (await addTemplateChip(select, label)) added.push(label);
+      else failed.push(`${label} (옵션 선택 실패)`);
+    }
+
+    const current = getTemplateChips(select).map(c => c.title);
+    const missing = keepLabels.filter(label =>
+      !current.some(title => chipLabelMatches(title, label)));
+    if (removed.length) console.log('[GFA Helper] 소재 유형 칩 제거: ' + removed.join(', '));
+    if (added.length) console.log('[GFA Helper] 소재 유형 칩 추가: ' + added.join(', '));
+    if (failed.length) console.log('[GFA Helper] 소재 유형 칩 실패: ' + failed.join(', '));
+    return { removed, added, failed, missing, remaining: current };
+  }
+
+  // 드롭다운을 잠깐 열어 선택 가능한 소재 유형 목록만 읽고 다시 닫음 (선택은 하지 않음)
+  async function listTemplateOptions(select) {
+    const searchInput = select.querySelector('input.ad-cms-select-input');
+    clickLikeUser(searchInput || select);
+    const started = Date.now();
+    let labels = [];
+    while (Date.now() - started < 3000) {
+      labels = Array.from(document.querySelectorAll(
+        '.ad-cms-select-item-option, .ad-cms-select-item, [role="option"]'
+      )).filter(el => {
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      }).map(el => normalizeText(el.textContent)).filter(Boolean);
+      if (labels.length) break;
+      await sleep(200);
+    }
+    closeSelectDropdown(searchInput || select);
+    await sleep(250);
+    return labels;
+  }
+
+  async function addTemplateChip(select, label) {
+    const searchInput = select.querySelector('input.ad-cms-select-input');
+    clickLikeUser(searchInput || select);
+    await sleep(350);
+
+    const started = Date.now();
+    while (Date.now() - started < 5000) {
+      const option = Array.from(document.querySelectorAll(
+        '.ad-cms-select-item-option, .ad-cms-select-item, [role="option"]'
+      )).filter(el => {
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      }).find(el => chipLabelMatches(el.textContent, label));
+
+      if (option) {
+        lastChipRemoveAt = Date.now(); // 구성 변경 다이얼로그 자동 확인 가드
+        clickLikeUser(option);
+        await sleep(700);
+        const ok = getTemplateChips(select).some(c => chipLabelMatches(c.title, label));
+        closeSelectDropdown(searchInput || select);
+        await sleep(250);
+        return ok;
+      }
+      await sleep(200);
+    }
+    closeSelectDropdown(searchInput || select);
+    return false;
+  }
+
+  function closeSelectDropdown(el) {
+    if (!el) return;
+    // 멀티셀렉트는 옵션 클릭 후에도 드롭다운이 열린 채로 남아 다음 조작을 가림
+    const opts = { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true };
+    el.dispatchEvent(new KeyboardEvent('keydown', opts));
+    el.dispatchEvent(new KeyboardEvent('keyup', opts));
+    if (typeof el.blur === 'function') el.blur();
+  }
+
+  // ============================================================
+  // 배너형 전용 문구 — 설명 문구1~3 / PC 배너형 긴 설명문구 1~2
+  // ============================================================
+  const BANNER_TEXT_FIELDS = [
+    { key: '설명문구1',   name: 'title',   keywords: ['설명\\s*문구\\s*1', '설명\\s*문구\\s*첫\\s*문장'] },
+    { key: '설명문구2',   name: 'content', keywords: ['설명\\s*문구\\s*2', '설명\\s*문구\\s*두\\s*번째'] },
+    { key: '설명문구3',   name: 'text3rd', keywords: ['설명\\s*문구\\s*3', '설명\\s*문구\\s*세\\s*번째'] },
+    { key: '긴설명문구1', name: 'text4th', keywords: ['긴\\s*설명\\s*문구\\s*1', '긴\\s*설명\\s*문구\\s*첫'] },
+    { key: '긴설명문구2', name: 'text5th', keywords: ['긴\\s*설명\\s*문구\\s*2', '긴\\s*설명\\s*문구\\s*두'] },
+  ];
+
+  async function fillBannerTexts(d) {
+    const out = {};
+    for (const field of BANNER_TEXT_FIELDS) {
+      const value = d[field.key];
+      if (!value) { out[field.key] = null; continue; }
+      out[field.key] = await fillInputUntilStable(
+        () => document.querySelector(`input[name="${field.name}"]`)
+          || document.querySelector(`textarea[name="${field.name}"]`)
+          || findInputByKeyword(field.keywords),
+        value,
+        field.key,
+        4000
+      );
+    }
+    const missed = Object.entries(out).filter(([, ok]) => ok === false).map(([key]) => key);
+    if (missed.length) console.warn('[GFA Helper] 배너형 문구 입력 실패: ' + missed.join(', '));
+    return out;
   }
 
   // ============================================================
