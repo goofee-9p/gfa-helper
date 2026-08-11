@@ -348,18 +348,14 @@
     const results = await fillCommonFields(d);
 
     // 광고 안내 문구 — ads.naver.com에서는 name="altMessage"
-    const guideEl = document.querySelector('input[name="altMessage"]')
-                 || document.querySelector('textarea[name="altMessage"]')
-                 || findInputByKeyword(['안내.*문구', '광고.*안내']);
-    if (guideEl && d['안내문구']) {
-      setReactValue(guideEl, d['안내문구']);
-      flashEl(guideEl);
-      results['안내문구'] = true;
-    } else if (!d['안내문구']) {
-      results['안내문구'] = null;
-    } else {
-      results['안내문구'] = false;
-    }
+    results['안내문구'] = await fillInputUntilStable(
+      () => document.querySelector('input[name="altMessage"]')
+        || document.querySelector('textarea[name="altMessage"]')
+        || findInputByKeyword(['안내.*문구', '광고.*안내']),
+      d['안내문구'],
+      '광고 안내 문구',
+      5000
+    );
 
     const adImageResult = await selectAdImage(d);
     results['광고이미지'] = adImageResult.ok;
@@ -370,6 +366,7 @@
       results['프로필이름'] = null;
       results['프로필이미지'] = null;
       results['CTA'] = null;
+      results['검증'] = await verifyAndRepairFields(d);
       return results;
     }
 
@@ -396,6 +393,8 @@
       results['CTA'] = null;
     }
 
+    // 모달을 여닫는 사이 폼이 다시 그려져 값이 날아갔을 수 있으니 마지막에 전부 재확인
+    results['검증'] = await verifyAndRepairFields(d);
     return results;
   }
 
@@ -430,18 +429,15 @@
   // ============================================================
   // 프로필 이름 (휴리스틱 — 정확한 셀렉터는 진단 후 확정)
   // ============================================================
+  function findProfileNameInput() {
+    return document.querySelector('input[name="profileName"]')
+      || document.querySelector('input[path="$.profile.name"]')
+      || document.querySelector('input[name="profile"]')
+      || findInputByKeyword(['프로필.*이름', '프로필명']);
+  }
+
   async function fillProfileName(value) {
-    if (!value) return null;
-    const el = document.querySelector('input[name="profileName"]')
-            || document.querySelector('input[path="$.profile.name"]')
-            || document.querySelector('input[name="profile"]')
-            || findInputByKeyword(['프로필.*이름', '프로필명']);
-    if (el) {
-      setReactValue(el, value);
-      flashEl(el);
-      return true;
-    }
-    return false;
+    return fillInputUntilStable(findProfileNameInput, value, '프로필 이름', 5000);
   }
 
   // ============================================================
@@ -804,38 +800,90 @@
 
     const uploadLock = await acquireUploadLock(d);
     if (!uploadLock.ok) return { ok: false, error: `업로드 차단: ${uploadLock.error}` };
+    const heartbeat = startUploadHeartbeat(uploadLock);
     try {
+      // 네이버 응답 속도가 그때그때 달라 한 번에 성공하지 못하는 경우가 잦다.
+      // 모달을 완전히 닫고 처음부터 다시, 갈수록 더 오래 기다리며 재시도.
+      let lastError = '';
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const res = await uploadAndPickAdImage(asset);
+        if (res.ok) return res;
+        lastError = res.error || '알 수 없는 오류';
+        console.warn(`[GFA Helper] 광고 이미지 ${attempt}/3 실패: ${lastError}`);
+        closeAdImageModals();
+        await sleep(1000 + attempt * 900);
+      }
+      return { ok: false, error: `${lastError} (3회 재시도 후 실패)` };
+    } finally {
+      stopUploadHeartbeat(heartbeat);
+      await releaseUploadLock(uploadLock);
+    }
+  }
 
-    const isVisible = (el) => {
-      if (!el) return false;
-      const rect = el.getBoundingClientRect();
-      const style = getComputedStyle(el);
-      return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
-    };
-    const normalizeText = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  // 업로드가 길어져도 업로드 순번이 죽은 탭으로 오인돼 회수되지 않도록 주기적으로 갱신
+  function startUploadHeartbeat(lock) {
+    if (!lock?.ok) return null;
+    return setInterval(() => {
+      chrome.runtime.sendMessage({
+        type: 'acquireUploadLock',
+        imageBatchId: lock.imageBatchId,
+        owner: lock.owner,
+        idx: lock.idx,
+      }).catch(() => {});
+    }, 30000);
+  }
+
+  function stopUploadHeartbeat(timer) {
+    if (timer) clearInterval(timer);
+  }
+
+  function isElVisible(el) {
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+  }
+
+  function closeAdImageModals() {
+    for (const dlg of Array.from(findDialogs()).filter(isElVisible)) {
+      if (!/광고\s*이미지\s*추가|광고\s*이미지를\s*선택/.test(dlg.textContent || '')) continue;
+      const close = dlg.querySelector('.ad-cms-modal-close, .ant-modal-close, [aria-label="Close"], [aria-label="close"]');
+      if (close) { close.click(); continue; }
+      const cancel = Array.from(dlg.querySelectorAll('button'))
+        .find(b => /^(취소|닫기)$/.test(normalizeText(b.textContent)));
+      if (cancel) cancel.click();
+    }
+  }
+
+  // 폼의 "광고 이미지" 영역에 실제로 썸네일이 붙었는지 (모달만 닫히고 반영 안 되는 경우 방지)
+  // 영역을 못 찾으면 null — 판단 불가로 보고 검사를 건너뛴다.
+  function countPickedAdImages() {
+    const root = document.getElementById('pickedImages');
+    if (!root) return null;
+    return root.querySelectorAll('img').length;
+  }
+
+  async function uploadAndPickAdImage(asset) {
+    const isVisible = isElVisible;
     const visibleDialogs = () => Array.from(findDialogs()).filter(isVisible);
     const click = (el) => {
       el.scrollIntoView?.({ block: 'center', inline: 'center' });
       el.click();
     };
-    const closeAdDialogs = () => {
-      for (const dlg of visibleDialogs()) {
-        if (/광고\s*이미지\s*추가/.test(dlg.textContent || '')) {
-          const close = dlg.querySelector('.ad-cms-modal-close, [aria-label="Close"], [aria-label="close"]');
-          if (close) close.click();
-        }
-      }
-    };
 
-    closeAdDialogs();
-    await sleep(200);
+    closeAdImageModals();
+    await sleep(300);
 
-    const buttons = Array.from(document.querySelectorAll('button')).filter(b =>
+    // 재시도로 들어왔는데 앞 시도에서 이미 붙었을 수 있다.
+    // 확인 없이 또 올리면 소재가 2개로 등록되므로 여기서 끝낸다.
+    const pickedBefore = countPickedAdImages() ?? 0;
+    if (pickedBefore > 0) return { ok: true, name: asset.name, already: true };
+
+    const findAddButton = () => Array.from(document.querySelectorAll('button')).filter(b =>
       isVisible(b)
       && !b.closest('[role="dialog"], [class*="modal"], [class*="Modal"]')
       && /이미지\s*(추가|업로드)|\+\s*이미지/.test(normalizeText(b.textContent))
-    );
-    const addBtn = buttons.find(b => {
+    ).find(b => {
       let p = b.parentElement;
       for (let depth = 0; depth < 8 && p; depth++, p = p.parentElement) {
         const txt = normalizeText(p.textContent);
@@ -843,18 +891,26 @@
         if (/광고\s*이미지|이미지\s*소재|소재\s*이미지/.test(txt)) return true;
       }
       return false;
-    });
+    }) || null;
+
+    // 폼이 아직 그려지는 중일 수 있으므로 버튼도 기다렸다 찾는다
+    let addBtn = null;
+    const btnStart = Date.now();
+    while (Date.now() - btnStart < 8000 && !addBtn) {
+      addBtn = findAddButton();
+      if (!addBtn) await sleep(250);
+    }
     if (!addBtn) return { ok: false, error: '광고 이미지 추가 버튼 못찾음' };
 
     click(addBtn);
 
     let modal = null;
     const modalStart = Date.now();
-    while (Date.now() - modalStart < 5000 && !modal) {
+    while (Date.now() - modalStart < 10000 && !modal) {
       modal = visibleDialogs().find(dlg => /광고\s*이미지\s*추가|광고\s*이미지를\s*선택/.test(dlg.textContent || '')) || null;
-      if (!modal) await sleep(150);
+      if (!modal) await sleep(200);
     }
-    if (!modal) return { ok: false, error: '광고 이미지 모달 못찾음' };
+    if (!modal) return { ok: false, error: '광고 이미지 모달이 안 열림 (네이버 응답 지연)' };
 
     const input = modal.querySelector('input[type="file"]');
     if (!input) return { ok: false, error: '광고 이미지 파일 input 못찾음' };
@@ -873,6 +929,16 @@
         img?.src || '',
         img?.getAttribute('alt') || '',
       ].join('|');
+    };
+    // 타일에 파일명이 노출되면 그걸로 "내가 올린 이미지"를 확정한다 (가장 확실한 근거)
+    const getTileName = (tile) => {
+      const img = tile.querySelector('img');
+      return normalizeText([
+        img?.getAttribute('alt') || '',
+        img?.getAttribute('title') || '',
+        tile.getAttribute('title') || '',
+        tile.textContent || '',
+      ].join(' ')).toLowerCase();
     };
     const getCount = () => {
       const count = (modal.querySelector('.css-vo6spr')?.textContent || '').trim();
@@ -917,29 +983,43 @@
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.dispatchEvent(new Event('change', { bubbles: true }));
 
+    // 업로드 직후 보관함에 새로 생긴 타일 중에서 내 것을 고른다.
+    // 1순위: 파일명이 일치하는 타일 / 2순위: 새로 생긴 것 중 좌상단
+    // (업로드는 배치 전체에서 한 번에 하나씩만 돌기 때문에 새 타일은 사실상 내 것뿐)
+    const wantedName = String(asset.name || '').replace(/\.[a-z0-9]+$/i, '').trim().toLowerCase();
     let newTile = null;
     let stableKey = '';
     let stableCount = 0;
     const uploadStart = Date.now();
-    while (Date.now() - uploadStart < 30000) {
+    while (Date.now() - uploadStart < 60000) {
       const uploadError = getUploadError();
       if (uploadError) {
         return { ok: false, error: `광고 이미지 업로드 실패: ${asset.name} / ${uploadError}` };
       }
-      const topLeftTile = getTilesByPosition()[0] || null;
-      const topLeftKey = topLeftTile ? getTileKey(topLeftTile) : '';
-      const img = topLeftTile?.querySelector('img');
-      const isReadyImage = !!(img?.complete && (img.currentSrc || img.src));
-      const isNewTopLeft = !!topLeftKey && !beforeKeys.has(topLeftKey) && isReadyImage;
-      if (isNewTopLeft) {
-        if (topLeftKey === stableKey) {
+      const fresh = getTiles().filter(tile => {
+        const key = getTileKey(tile);
+        if (!key || beforeKeys.has(key)) return false;
+        const img = tile.querySelector('img');
+        return !!(img?.complete && (img.currentSrc || img.src));
+      });
+      const candidate = (wantedName && fresh.find(tile => getTileName(tile).includes(wantedName)))
+        || fresh.sort((a, b) => {
+          const ra = a.getBoundingClientRect();
+          const rb = b.getBoundingClientRect();
+          return (ra.top - rb.top) || (ra.left - rb.left);
+        })[0]
+        || null;
+
+      if (candidate) {
+        const key = getTileKey(candidate);
+        if (key === stableKey) {
           stableCount++;
         } else {
-          stableKey = topLeftKey;
+          stableKey = key;
           stableCount = 1;
         }
         if (stableCount >= 2) {
-          newTile = topLeftTile;
+          newTile = candidate;
           break;
         }
       } else {
@@ -948,7 +1028,7 @@
       }
       await sleep(300);
     }
-    if (!newTile) return { ok: false, error: '업로드 후 좌상단 새 이미지 타일 못찾음' };
+    if (!newTile) return { ok: false, error: `업로드한 이미지가 보관함에 안 나타남 (${asset.name})` };
 
     // 3) 새 타일이 자동 선택 안 됐으면 클릭으로 선택
     if (!isTileSelected(newTile)) {
@@ -977,11 +1057,18 @@
     const okBtn = Array.from(modal.querySelectorAll('button')).find(b => /^확인$/.test(normalizeText(b.textContent)) && !b.disabled);
     if (!okBtn) return { ok: false, error: '광고 이미지 확인 버튼 못찾음' };
     click(okBtn);
-    await sleep(700);
-    return { ok: true, name: asset.name };
-    } finally {
-      await releaseUploadLock(uploadLock);
+
+    // 모달이 닫혔다고 폼에 반영된 건 아니다 — 실제로 썸네일이 붙었는지까지 확인
+    const applyStart = Date.now();
+    while (Date.now() - applyStart < 10000) {
+      const stillOpen = visibleDialogs().some(dlg => /광고\s*이미지\s*추가/.test(dlg.textContent || ''));
+      const picked = countPickedAdImages();
+      if (!stillOpen && (picked === null || picked > pickedBefore)) {
+        return { ok: true, name: asset.name };
+      }
+      await sleep(300);
     }
+    return { ok: false, error: '이미지를 골랐지만 폼에 반영되지 않음' };
   }
 
   // ============================================================
@@ -991,44 +1078,39 @@
     const isShopping = !!d['쇼핑프로모션'];
     const isBannerTemplate = !!d['배너형'];
 
-    // 배너형은 칩 구성에 따라 설명 문구 입력칸이 새로 렌더링되므로 텍스트 입력 전에 칩부터 확정
-    const earlyChipResult = isBannerTemplate
-      ? await ensureCreativeTemplates(BANNER_TEMPLATE_LABELS)
-      : null;
-
-    const results = await fillCommonFields(d);
-
+    // 소재 유형 칩을 건드리면 확인 다이얼로그가 뜨고 폼이 통째로 다시 그려진다.
+    // 값을 넣은 뒤에 정리하면 그때 날아가므로 무조건 칩부터 확정한다.
+    let chipResult;
     if (isShopping) {
       // 쇼핑프로모션: 칩(배너형 모바일/PC)을 유지함 — 제거 X
-      results['소재유형정리'] = { removed: [], failed: [], skipped: '쇼핑프로모션 (칩 유지)' };
+      chipResult = { removed: [], failed: [], skipped: '쇼핑프로모션 (칩 유지)' };
     } else if (isBannerTemplate) {
       // 네이티브 배너형: 피드형 등 다른 칩 제거 → 배너형(모바일)+배너형(PC)만 남김
-      results['소재유형정리'] = earlyChipResult;
-      const chipError = earlyChipResult?.error
-        || (earlyChipResult?.missing?.length ? `배너형 칩 없음: ${earlyChipResult.missing.join(', ')}` : '');
-      if (chipError) results['소재유형정리오류'] = chipError;
+      chipResult = await ensureCreativeTemplates(BANNER_TEMPLATE_LABELS);
     } else {
       // 네이티브 그룹: 칩 제거 → 피드형만 남김
-      const chipResult = await removeChips(['배너형 (모바일)', '배너형(모바일)', '배너형 (PC)', '배너형(PC)']);
-      results['소재유형정리'] = chipResult;
-      if (chipResult.remaining?.length) {
-        results['소재유형정리오류'] = `남은 배너형 칩: ${chipResult.remaining.join(', ')}`;
-      }
+      chipResult = await removeChips(['배너형 (모바일)', '배너형(모바일)', '배너형 (PC)', '배너형(PC)']);
+    }
+
+    const results = await fillCommonFields(d);
+    results['소재유형정리'] = chipResult;
+    if (isBannerTemplate) {
+      const chipError = chipResult?.error
+        || (chipResult?.missing?.length ? `배너형 칩 없음: ${chipResult.missing.join(', ')}` : '');
+      if (chipError) results['소재유형정리오류'] = chipError;
+    } else if (!isShopping && chipResult.remaining?.length) {
+      results['소재유형정리오류'] = `남은 배너형 칩: ${chipResult.remaining.join(', ')}`;
     }
 
     // 광고 문구 — ads.naver.com에서는 textarea[name="creativeMessage"]
-    const copyEl = document.querySelector('textarea[name="creativeMessage"]')
-                || document.querySelector('input[name="creativeMessage"]')
-                || findInputByKeyword(['광고.*문구', '소재.*문구', '본문']);
-    if (copyEl && d['광고문구']) {
-      setReactValue(copyEl, d['광고문구']);
-      flashEl(copyEl);
-      results['광고문구'] = true;
-    } else if (!d['광고문구']) {
-      results['광고문구'] = null;
-    } else {
-      results['광고문구'] = false;
-    }
+    results['광고문구'] = await fillInputUntilStable(
+      () => document.querySelector('textarea[name="creativeMessage"]')
+        || document.querySelector('input[name="creativeMessage"]')
+        || findInputByKeyword(['광고.*문구', '소재.*문구', '본문']),
+      d['광고문구'],
+      '광고 문구',
+      5000
+    );
 
     // 배너형 전용 — 설명 문구1~3 / PC 배너형 긴 설명문구 1~2
     if (isBannerTemplate) {
@@ -1072,6 +1154,8 @@
       results['CTA슬롯'] = slotResults;
     }
 
+    // 이미지 모달·행동 유도 드롭다운을 거치며 값이 날아갔을 수 있으니 마지막에 전부 재확인
+    results['검증'] = await verifyAndRepairFields(d);
     return results;
   }
 
@@ -1584,15 +1668,94 @@
     return String(s).replace(/"/g, '&quot;');
   }
 
-  async function clickSaveCreative() {
-    const isVisible = (el) => {
-      if (!el) return false;
-      const rect = el.getBoundingClientRect();
-      const style = getComputedStyle(el);
-      return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
-    };
+  // ============================================================
+  // 저장 전 최종 검증 — 재렌더·타이머 스로틀링으로 비어버린 값을 다시 채운다
+  // ============================================================
+  function collectFieldChecks(d) {
+    const checks = [];
+    const push = (label, value, find) => { if (value) checks.push({ label, value, find }); };
+
+    push('소재명', d['소재명'], () => document.querySelector('input[name="creativeName"]')
+      || document.querySelector('input#creativeName'));
+    push('랜딩 URL', d['랜딩URL'], () => document.querySelector('input[name="link"]')
+      || document.querySelector('input#creativeLink'));
+
+    if (d['소재타입'] === 'image-banner') {
+      push('광고 안내 문구', d['안내문구'], () => document.querySelector('input[name="altMessage"]')
+        || document.querySelector('textarea[name="altMessage"]'));
+    } else {
+      push('광고 문구', d['광고문구'], () => document.querySelector('textarea[name="creativeMessage"]')
+        || document.querySelector('input[name="creativeMessage"]'));
+    }
+
+    if (d['배너형']) {
+      for (const field of BANNER_TEXT_FIELDS) {
+        push(field.key, d[field.key], () => document.querySelector(`input[name="${field.name}"]`)
+          || document.querySelector(`textarea[name="${field.name}"]`));
+      }
+    }
+
+    // 스마트채널 폼에는 프로필 이름 칸 자체가 없음
+    if (!d['스마트채널'] && d['지면'] !== '스마트채널') {
+      push('프로필 이름', d['프로필이름'], findProfileNameInput);
+    }
+
+    if (Array.isArray(d['ctaSlots'])) {
+      d['ctaSlots'].forEach((slot, i) => {
+        push(`행동유도${i + 1} 문구`, slot.text, () => findCtaTextInputs()[i] || null);
+        push(`행동유도${i + 1} URL`, slot.url, () => findCtaUrlInputs()[i] || null);
+      });
+    }
+    return checks;
+  }
+
+  // GFA 입력칸의 maxlength 때문에 잘려 들어간 건 정상으로 본다
+  function expectedValueFor(el, value) {
+    const max = parseInt(el.getAttribute('maxlength') || '0', 10);
+    return max > 0 ? [...String(value)].slice(0, max).join('') : String(value);
+  }
+
+  async function verifyAndRepairFields(d, { rounds = 2 } = {}) {
+    const checks = collectFieldChecks(d);
+    let bad = [];
+    for (let round = 0; round <= rounds; round++) {
+      bad = checks.filter(c => {
+        const el = c.find();
+        if (!el) return true;
+        return normalizeText(el.value || '') !== normalizeText(expectedValueFor(el, c.value));
+      });
+      if (!bad.length || round === rounds) break;
+      for (const c of bad) {
+        const el = c.find();
+        if (!el) continue;
+        setReactValue(el, expectedValueFor(el, c.value));
+        flashEl(el, '#f59e0b');
+        await sleep(150);
+      }
+      await sleep(500);
+    }
+    const missing = bad.map(c => c.label);
+    if (missing.length) console.warn('[GFA Helper] 검증 실패 항목: ' + missing.join(', '));
+    return { ok: missing.length === 0, missing };
+  }
+
+  async function clickSaveCreative({ force = false } = {}) {
+    const d = activePayload?.data || null;
+
+    // 자동입력이 덜 된 소재를 그대로 저장하면 반쯤 빈 소재가 등록된다.
+    // 저장 직전에 다시 채워보고, 그래도 비면 저장하지 않고 사유를 돌려준다.
+    if (d) {
+      const problems = [];
+      const repair = await verifyAndRepairFields(d);
+      if (!repair.ok) problems.push(`입력 누락: ${repair.missing.join(', ')}`);
+      if (countPickedAdImages() === 0) problems.push('광고 이미지 없음');
+      if (problems.length && !force) {
+        return { ok: false, error: problems.join(' / ') };
+      }
+    }
+
     const buttons = Array.from(document.querySelectorAll('button'))
-      .filter(b => isVisible(b) && !b.disabled && normalizeText(b.textContent) === '저장');
+      .filter(b => isElVisible(b) && !b.disabled && normalizeText(b.textContent) === '저장');
     const saveBtn = buttons.find(b => !b.closest('#__gfa_helper_panel')) || buttons[0];
     if (!saveBtn) return { ok: false, error: '저장 버튼 못찾음' };
     saveBtn.scrollIntoView?.({ block: 'center', inline: 'center' });
@@ -1680,6 +1843,7 @@
 
   let dismissedCount = 0;
   let lastChipRemoveAt = 0; // 칩 제거 다이얼로그 자동 처리 가드
+  let activePayload = null; // 이 탭이 맡은 소재 (저장 전 검증에 사용)
 
   function tryDismissDialog(dlg) {
     const txt = (dlg.textContent || '');
@@ -1774,6 +1938,7 @@
 
     const payload = decodePayload();
     if (!payload) return; // no hash → just a regular page
+    activePayload = payload; // 저장 직전 검증에서 다시 씀
 
     // 2) 다이얼로그 워처가 초기 정리할 시간 확보 (200ms 폴러 2~3 cycles)
     await sleep(800);
@@ -1806,7 +1971,7 @@
       return;
     }
     if (msg.type === 'saveCreative') {
-      clickSaveCreative()
+      clickSaveCreative({ force: !!msg.force })
         .then(sendResponse)
         .catch(e => sendResponse({ ok: false, error: e?.message || String(e) }));
       return true;

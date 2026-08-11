@@ -555,16 +555,30 @@ function getImageRule(sizeLabel) {
 }
 
 function getRuleForSlot(slotIndex) {
-  return getImageRule(lastPayloads[slotIndex]?.['이미지사이즈']);
+  const label = lastPayloads[slotIndex]?.['이미지사이즈'];
+  const rule = getImageRule(label);
+  if (rule) return rule;
+  // 용량 기준이 따로 없는 지면(스마트채널)은 픽셀 크기만 기준으로 삼는다
+  const size = parseSizeLabel(label);
+  return size ? { ...size, min: 0, max: Infinity, label: String(label), range: '' } : null;
+}
+
+// 파일명에서 혜택·번호 힌트 추출 (예: "260810_할인_2_750x280.png" → 할인 2번)
+function parseFilenameHint(name) {
+  const s = String(name || '').toLowerCase();
+  let benefit = '';
+  if (/할인|discount|sale/.test(s)) benefit = '할인';
+  else if (/사은|gift/.test(s)) benefit = '사은';
+  else if (/usp/.test(s)) benefit = 'USP';
+  const m = s.match(/(?:할인|사은|usp|discount|gift|sale)[\s_-]*(\d{1,2})/);
+  return { benefit, number: m ? String(parseInt(m[1], 10)) : '' };
 }
 
 function findAutoImageSlot(dim, usedSlots) {
-  if (getActiveChannel() !== 'native') return null;
-  const filenameHint = (findAutoImageSlot.currentFileName || '').toLowerCase();
-  const wantsDiscount = /할인|discount|sale/.test(filenameHint);
-  const wantsGift = /사은|gift/.test(filenameHint);
-  const numberMatch = filenameHint.match(/(?:할인|사은|discount|gift|sale)?[\s_-]*([12])(?:\D|$)/);
-  const wantsNumber = numberMatch?.[1] || '';
+  const channel = getActiveChannel();
+  // 스마트채널도 드롭 순서가 아니라 픽셀 크기 + 파일명으로 슬롯을 찾는다
+  if (channel !== 'native' && channel !== 'smart') return null;
+  const { benefit: wantBenefit, number: wantNumber } = parseFilenameHint(findAutoImageSlot.currentFileName);
 
   const candidates = [];
   for (let i = 0; i < lastPayloads.length; i++) {
@@ -574,30 +588,22 @@ function findAutoImageSlot(dim, usedSlots) {
   }
   if (!candidates.length) return null;
 
-  const hintedByBenefitAndNumber = candidates.find(i => {
-    const benefit = lastPayloads[i]?.['혜택'];
-    const number = String(lastPayloads[i]?.['번호'] || '');
-    if (wantsNumber && wantsDiscount) return benefit === '할인' && number === wantsNumber;
-    if (wantsNumber && wantsGift) return benefit === '사은' && number === wantsNumber;
-    return false;
-  });
-  if (hintedByBenefitAndNumber !== undefined) return hintedByBenefitAndNumber;
-
-  const hintedByBenefit = candidates.find(i => {
-    const benefit = lastPayloads[i]?.['혜택'];
-    if (wantsDiscount) return benefit === '할인';
-    if (wantsGift) return benefit === '사은';
-    return false;
-  });
-  return hintedByBenefit ?? candidates[0];
+  if (wantBenefit && wantNumber) {
+    const exact = candidates.find(i => lastPayloads[i]?.['혜택'] === wantBenefit
+      && String(lastPayloads[i]?.['번호'] || '') === wantNumber);
+    if (exact !== undefined) return exact;
+  }
+  if (wantBenefit) {
+    const byBenefit = candidates.find(i => lastPayloads[i]?.['혜택'] === wantBenefit);
+    if (byBenefit !== undefined) return byBenefit;
+  }
+  return candidates[0];
 }
 
 async function validateImageFileForSlot(file, slotIndex, knownDim = null) {
-  const channel = getActiveChannel();
-  if (channel !== 'native' && channel !== 'shopping') return { ok: true };
   const payload = lastPayloads[slotIndex];
   const rule = getRuleForSlot(slotIndex);
-  if (!rule) return { ok: true };
+  if (!rule || !payload) return { ok: true };
 
   const dim = knownDim || await getImageDimensions(file);
   if (dim.width !== rule.width || dim.height !== rule.height) {
@@ -606,7 +612,7 @@ async function validateImageFileForSlot(file, slotIndex, knownDim = null) {
       error: `${payload['혜택']}${payload['번호']} 소재는 ${rule.label} 이미지만 넣을 수 있습니다.\n선택한 파일: ${dim.width}×${dim.height}`,
     };
   }
-  if (file.size < rule.min || file.size > rule.max) {
+  if (Number.isFinite(rule.max) && (file.size < rule.min || file.size > rule.max)) {
     const kb = Math.round(file.size / 1024);
     return {
       ok: false,
@@ -630,22 +636,39 @@ async function setImageFiles(files, { append = true, startIndex = null } = {}) {
     alert('소재 슬롯을 먼저 만들 수 없습니다.\n네이티브/스마트채널/쇼핑프로모션 탭과 소재 개수를 확인해주세요.');
     return;
   }
+  // 스마트채널은 750×280 / 750×160 중 어느 세트를 떨궜는지 파일에서 알아내 높이를 맞춰준다
+  // (높이가 어긋난 채로 검사하면 멀쩡한 이미지가 전부 반려됨)
+  if (getActiveChannel() === 'smart' && startIndex === null && imageFiles.length) {
+    try {
+      const first = await getImageDimensions(imageFiles[0]);
+      if (first.width === 750 && (first.height === 160 || first.height === 280)
+          && first.height !== getSmartChannelHeight()) {
+        setSmartChannelHeight(first.height);
+        updatePreview();
+        saveState();
+      }
+    } catch (e) {
+      console.warn('[GFA Helper] 스마트채널 높이 자동 판별 실패:', e);
+    }
+  }
+
   const baseIndex = startIndex !== null ? startIndex : (append ? imageAssetsByIndex.length : 0);
   const accepted = [];
   const rejected = [];
   const usedSlots = new Set();
+  const autoMatch = startIndex === null && ['native', 'smart'].includes(getActiveChannel());
   for (let i = 0; i < imageFiles.length; i++) {
     const file = imageFiles[i];
     let dim = null;
     let slotIndex = baseIndex + i;
-    if (getActiveChannel() === 'native' && startIndex === null) {
+    if (autoMatch) {
       try {
         dim = await getImageDimensions(file);
         findAutoImageSlot.currentFileName = file.name;
         const matchedSlot = findAutoImageSlot(dim, usedSlots);
         findAutoImageSlot.currentFileName = '';
         if (matchedSlot === null) {
-          rejected.push(`${file.name}\n해당 크기(${dim.width}×${dim.height})에 맞는 빈 네이티브 슬롯이 없습니다.`);
+          rejected.push(`${file.name}\n해당 크기(${dim.width}×${dim.height})에 맞는 빈 슬롯이 없습니다.`);
           continue;
         }
         slotIndex = matchedSlot;
@@ -716,7 +739,7 @@ function updateImageMatchList() {
       ? '스마트채널'
       : p['배너형'] ? '네이티브 배너형'
       : p['소재타입'] === 'image-banner' ? '이미지 배너' : '네이티브';
-    const displaySize = p['스마트채널'] ? '750×280 / 750×160' : p['이미지사이즈'];
+    const displaySize = p['이미지사이즈'];
     const assetMeta = asset
       ? `${asset.width && asset.height ? `${asset.width}×${asset.height}` : displaySize} · ${Math.round((asset.bytes || 0) / 1024)}KB · ${asset.name}`
       : '';
@@ -874,18 +897,39 @@ $('openBatchBtn').addEventListener('click', async () => {
 
 $('saveOpenedBtn')?.addEventListener('click', async () => {
   if (!confirm('자동 세팅으로 열린 소재 탭의 저장 버튼을 모두 누를까요?')) return;
+  await runSaveOpened(false);
+});
+
+async function runSaveOpened(force) {
   setStatus('열린 소재 탭 저장 중...');
   try {
-    const res = await chrome.runtime.sendMessage({ type: 'saveOpenedMaterials' });
+    const res = await chrome.runtime.sendMessage({ type: 'saveOpenedMaterials', force });
     if (!res?.ok) {
       setStatus('열린 소재 저장 실패', true);
+      return;
+    }
+    if (res.pending > 0) {
+      alert(`아직 ${res.pending}개 소재 탭이 열리는 중입니다.\n다 열린 뒤 "열린 소재 저장"을 한 번 더 눌러주세요.`);
+    }
+    if (res.failed > 0) {
+      // 자동입력이 덜 된 탭은 저장하지 않고 사유를 돌려준다
+      const reasons = (res.results || [])
+        .filter(r => !r.ok)
+        .map((r, i) => `${i + 1}. ${r.error || '알 수 없는 오류'}`)
+        .join('\n');
+      const retry = confirm(
+        `성공 ${res.saved}개 / 저장 안 함 ${res.failed}개\n\n${reasons}\n\n` +
+        `해당 탭은 저장하지 않았습니다.\n탭에서 직접 확인해 고치는 걸 권장합니다.\n\n` +
+        `그래도 이대로 저장할까요?`
+      );
+      if (retry) await runSaveOpened(true);
       return;
     }
     setStatus(`저장 실행: 성공 ${res.saved}개 / 실패 ${res.failed}개`);
   } catch (e) {
     setStatus(`열린 소재 저장 실패: ${e.message || e}`, true);
   }
-});
+}
 
 // ============================================================
 // Copy native to banner buttons

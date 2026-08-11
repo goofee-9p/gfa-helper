@@ -20,12 +20,22 @@ const runBatches = {};
 const uploadLocks = {};
 let latestOpenedMaterialTabs = [];
 
+// 탭을 한꺼번에 다 열면 (1) 이미지 업로드가 서로 엉키고 (2) 뒤쪽 탭이 백그라운드에서
+// 5분 넘게 대기하다 크롬 타이머 스로틀링에 걸려 모달 대기가 통째로 타임아웃 난다.
+// → 자동입력이 끝난 탭 수만큼만 다음 탭을 여는 웨이브 방식.
+const MAX_CONCURRENT_TABS = 3;
+// 자동입력 완료 신호가 안 오는 탭(사용자가 닫음/스크립트 중단)이 큐를 막지 않도록 하는 상한
+const TAB_STALL_MS = 150000;
+
 async function openNextBatchTab(batchId) {
   const batch = runBatches[batchId];
-  if (!batch || batch.nextIndex >= batch.items.length) {
-    delete runBatches[batchId];
+  if (!batch) return;
+  if (batch.nextIndex >= batch.items.length) {
+    if (batch.finished.size >= batch.items.length) delete runBatches[batchId];
     return;
   }
+  const running = batch.nextIndex - batch.finished.size;
+  if (running >= batch.maxConcurrent) return;
 
   const i = batch.nextIndex++;
   const url = buildUrl(batch.urlTemplate, {
@@ -38,17 +48,31 @@ async function openNextBatchTab(batchId) {
 
   const tab = await chrome.tabs.create({ url, active: false });
   batch.opened.push(tab.id);
+  batch.tabIndex[tab.id] = i;
   latestOpenedMaterialTabs.push(tab.id);
+  batch.timers[i] = setTimeout(() => markBatchItemFinished(batchId, i), TAB_STALL_MS);
 }
 
-async function openBatchTabsFast(batchId) {
+function markBatchItemFinished(batchId, idx) {
+  // 자동입력이 (성공이든 실패든) 끝난 소재는 업로드 순번에서도 빼 준다.
+  // 라디오 실패 등으로 업로드까지 못 간 탭이 뒤 탭의 순번을 잡아두는 걸 막는다.
+  const lock = uploadLocks[batchId]
+    || (uploadLocks[batchId] = { holders: {}, done: {}, maxParallel: 1 });
+  lock.done[idx] = true;
+
   const batch = runBatches[batchId];
-  if (!batch) return;
-  while (batch.nextIndex < batch.items.length) {
-    await openNextBatchTab(batchId);
-    await new Promise(resolve => setTimeout(resolve, 250));
+  if (!batch || batch.finished.has(idx)) return;
+  batch.finished.add(idx);
+  if (batch.timers[idx]) {
+    clearTimeout(batch.timers[idx]);
+    delete batch.timers[idx];
   }
-  delete runBatches[batchId];
+  openNextBatchTab(batchId);
+}
+
+function pendingBatchCount() {
+  return Object.values(runBatches)
+    .reduce((sum, batch) => sum + Math.max(0, batch.items.length - batch.nextIndex), 0);
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -129,14 +153,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         imageBatchId,
         nextIndex: 0,
         opened: [],
+        finished: new Set(),
+        timers: {},
+        tabIndex: {},
+        maxConcurrent: MAX_CONCURRENT_TABS,
       };
-      latestOpenedMaterialTabs = [];
-      await openBatchTabsFast(imageBatchId);
+      // 이전 배치 탭 목록을 지우지 않고 누적 — 네이티브 열고 스마트채널 열면
+      // 앞 배치가 "열린 소재 저장"에서 통째로 빠지던 문제
+      for (let i = 0; i < MAX_CONCURRENT_TABS; i++) await openNextBatchTab(imageBatchId);
       sendResponse({ ok: true, count: items.length });
     })();
     return true;
   }
   if (msg.type === 'autofillDone') {
+    const batchId = msg.imageBatchId;
+    const idx = Number(msg.idx);
+    if (batchId && Number.isFinite(idx)) markBatchItemFinished(batchId, idx);
+    sendResponse({ ok: true });
+    return true;
+  }
+  if (msg.type === 'resetOpenedMaterials') {
+    latestOpenedMaterialTabs = [];
     sendResponse({ ok: true });
     return true;
   }
@@ -150,11 +187,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const owner = msg.owner || `${sender.tab?.id || 'tab'}_${Date.now()}`;
     const now = Date.now();
     const idx = Number.isFinite(Number(msg.idx)) ? Number(msg.idx) : null;
-    const maxParallel = Math.max(1, Math.min(4, Number(msg.maxParallel) || 2));
+    // GFA 이미지 보관함은 계정 전체가 공유라, 두 탭이 동시에 올리면 서로의 이미지를
+    // 집어갈 수 있다. 업로드는 무조건 한 번에 하나만.
+    const maxParallel = 1;
     const state = uploadLocks[key] || { holders: {}, done: {}, maxParallel };
     state.maxParallel = maxParallel;
     for (const [holder, info] of Object.entries(state.holders)) {
-      if (now - info.at > 120000) delete state.holders[holder];
+      if (now - info.at > 180000) {
+        // 죽은 탭이 계속 순번을 잡고 있으면 뒤 탭이 영원히 못 올라가므로 완료 처리
+        if (info.idx !== null && info.idx !== undefined) state.done[info.idx] = true;
+        delete state.holders[holder];
+      }
     }
     let firstPending = 0;
     if (idx !== null) {
@@ -163,7 +206,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const inWindow = idx === null || idx < firstPending + maxParallel;
     const holderCount = Object.keys(state.holders).length;
     if (state.holders[owner] || (inWindow && holderCount < maxParallel)) {
-      state.holders[owner] = { at: now, idx };
+      state.holders[owner] = { at: now, idx, tabId: sender.tab?.id ?? null };
       uploadLocks[key] = state;
       sendResponse({ ok: true, granted: true, owner, firstPending, maxParallel });
     } else {
@@ -188,6 +231,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'saveOpenedMaterials') {
     (async () => {
       const tabIds = [...new Set(latestOpenedMaterialTabs)];
+      const pending = pendingBatchCount();
       const results = [];
       for (const tabId of tabIds) {
         try {
@@ -196,15 +240,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             results.push({ tabId, ok: false, error: 'GFA 탭 아님' });
             continue;
           }
-          const res = await chrome.tabs.sendMessage(tabId, { type: 'saveCreative' });
+          const res = await chrome.tabs.sendMessage(tabId, { type: 'saveCreative', force: !!msg.force });
           results.push({ tabId, ok: !!res?.ok, error: res?.error || '' });
         } catch (e) {
           results.push({ tabId, ok: false, error: e?.message || String(e) });
         }
       }
-      latestOpenedMaterialTabs = tabIds.filter(tabId => results.some(r => r.tabId === tabId && r.ok !== false));
+      // 저장에 성공한 탭은 목록에서 빼서 두 번 저장되는 일이 없게 한다 (실패분만 남김)
+      latestOpenedMaterialTabs = results.filter(r => !r.ok).map(r => r.tabId);
       sendResponse({
         ok: true,
+        pending,
         total: results.length,
         saved: results.filter(r => r.ok).length,
         failed: results.filter(r => !r.ok).length,
@@ -213,4 +259,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     })();
     return true;
   }
+});
+
+// 탭을 닫으면 그 탭이 쥐고 있던 업로드 순번과 배치 순번을 즉시 풀어준다.
+// (안 그러면 뒤 탭들이 잠금 대기 3분 → 업로드 실패로 줄줄이 밀림)
+chrome.tabs.onRemoved.addListener((tabId) => {
+  for (const state of Object.values(uploadLocks)) {
+    for (const [holder, info] of Object.entries(state.holders || {})) {
+      if (info.tabId !== tabId) continue;
+      if (info.idx !== null && info.idx !== undefined) state.done[info.idx] = true;
+      delete state.holders[holder];
+    }
+  }
+  for (const [batchId, batch] of Object.entries(runBatches)) {
+    const idx = batch.tabIndex?.[tabId];
+    if (idx !== undefined) markBatchItemFinished(batchId, idx);
+  }
+  latestOpenedMaterialTabs = latestOpenedMaterialTabs.filter(id => id !== tabId);
 });
