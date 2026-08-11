@@ -30,6 +30,20 @@
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   const normalizeText = (s) => (s || '').replace(/\s+/g, ' ').trim();
 
+  // 조건이 만족될 때까지 짧게 폴링.
+  // 자동입력은 항상 "활성 탭"에서만 돌기 때문에 타이머가 늦춰지지 않아
+  // 고정 대기(sleep) 대신 짧은 간격으로 확인하는 편이 훨씬 빠르다.
+  async function waitFor(check, maxMs = 3000, step = 80) {
+    const start = Date.now();
+    for (;;) {
+      let ok = false;
+      try { ok = !!check(); } catch (e) { ok = false; }
+      if (ok) return true;
+      if (Date.now() - start >= maxMs) return false;
+      await sleep(step);
+    }
+  }
+
   function clickLikeUser(el) {
     if (!el) return;
     const rect = el.getBoundingClientRect();
@@ -126,7 +140,7 @@
       // 폴백: 일반 text input이 충분히 있으면 (검색바 외에 폼 입력칸 존재)
       const inputs = document.querySelectorAll('input[type="text"], input:not([type]), textarea');
       if (inputs.length > 4) return true;
-      await sleep(300);
+      await sleep(120);
     }
     return false;
   }
@@ -177,20 +191,18 @@
       for (let retry = 0; retry < 3 && !clicked; retry++) {
         lastTypeClickAt = Date.now();
         best.click();
-        await sleep(400); // 다이얼로그 뜨고 자동 닫히고 라디오 체크 반영 대기
-
-        if (best.checked) { clicked = true; break; }
+        // 다이얼로그가 뜨고 자동으로 닫히고 라디오에 반영될 때까지 — 되는 즉시 진행
+        if (await waitFor(() => best.checked, 1600, 80)) { clicked = true; break; }
 
         // 라디오 click이 안 먹으면 부모 카드 클릭
         let p = best.parentElement;
         for (let d = 0; d < 4 && p && !clicked; d++, p = p.parentElement) {
           lastTypeClickAt = Date.now();
           p.click();
-          await sleep(300);
-          if (best.checked) { clicked = true; break; }
+          if (await waitFor(() => best.checked, 900, 80)) { clicked = true; break; }
         }
         if (clicked) break;
-        await sleep(400); // 다음 retry 전 추가 대기
+        await sleep(300); // 다음 retry 전 추가 대기
       }
 
       if (!best.checked) {
@@ -204,7 +216,7 @@
       const switched = await waitForFormSwitch(type, 10000);
       if (!switched) console.warn('[GFA Helper] 폼 전환 타임아웃: ' + type);
     } else {
-      await sleep(300);
+      await sleep(150);
     }
     return { ok: true };
   }
@@ -226,7 +238,7 @@
       } else {
         return true;
       }
-      await sleep(200);
+      await sleep(100);
     }
     return false;
   }
@@ -253,7 +265,7 @@
       const checked = getCheckedCreativeType();
       const switched = await waitForFormSwitch(type, 800);
       if (checked === type && switched) return { ok: true };
-      await sleep(250);
+      await sleep(120);
     }
     return {
       ok: false,
@@ -288,14 +300,14 @@
       if (el) {
         lastEl = el;
         setReactValue(el, value);
-        await sleep(120);
+        await sleep(60);
         const current = el.value || '';
         if (current === value) {
           flashEl(el);
           return true;
         }
       }
-      await sleep(180);
+      await sleep(90);
     }
     if (lastEl) {
       setReactValue(lastEl, value);
@@ -373,7 +385,8 @@
     // 행동 유도 "사용" 라디오 항상 클릭 (기본값이 "사용 안함"이라 안 누르면 입력칸 안 나옴)
     const enabledOk = await enableActionUsage();
     results['행동유도_사용'] = enabledOk;
-    await sleep(800); // 프로필 이미지/CTA 영역 렌더링 대기
+    // 프로필 이미지/CTA 영역이 그려질 때까지 — 나오는 즉시 진행
+    await waitFor(() => !!findProfileNameInput() || findCtaTextInputs().length > 0, 2500, 80);
 
     // 프로필 이름 (이미지 배너는 행동 유도 사용 후 필드가 열리는 케이스가 있음)
     results['프로필이름'] = await fillProfileName(d['프로필이름']);
@@ -454,7 +467,7 @@
       if (result.ok) return result;
       lastError = result.error || '알 수 없는 오류';
       console.log(`[GFA Helper] 프로필 이미지 선택 ${attempt}차 실패: ${lastError}`);
-      await sleep(700);
+      await sleep(400);
     }
     return { ok: false, error: lastError };
   }
@@ -567,7 +580,7 @@
     for (const dlg of getVisibleDialogs()) {
       if (/광고\s*이미지\s*추가/.test(dlg.textContent || '')) {
         closeDialog(dlg);
-        await sleep(300);
+        await sleep(150);
       }
     }
 
@@ -576,13 +589,13 @@
     const buttonStart = Date.now();
     while (Date.now() - buttonStart < 5000 && !addBtn) {
       addBtn = findProfileImageAddButton();
-      if (!addBtn) await sleep(200);
+      if (!addBtn) await sleep(100);
     }
     if (!addBtn) return { ok: false, error: '이미지 추가 버튼 못찾음: ' + (describeImageAddCandidates() || '후보 없음') };
 
     clickLikeUser(addBtn);
     flashEl(addBtn, '#3b82f6');
-    await sleep(300);
+    await sleep(120);
 
     // 2) "이미지 선택" 모달 찾기
     let modal = null;
@@ -593,7 +606,7 @@
         const txt = dlg.textContent || '';
         return /프로필\s*이미지|로고|이미지\s*선택/.test(txt) && !/광고\s*이미지\s*추가/.test(txt);
       }) || null;
-      if (!modal) await sleep(200);
+      if (!modal) await sleep(100);
     }
     if (!modal) return { ok: false, error: '이미지 선택 모달 못찾음' };
     if (/광고\s*이미지\s*추가/.test(modal.textContent || '')) {
@@ -705,12 +718,12 @@
         const text = (b.textContent || '').trim();
         return /^확인$/.test(text) && !b.disabled && isVisible(b);
       });
-      if (!confirmBtn) await sleep(200);
+      if (!confirmBtn) await sleep(100);
     }
     if (!confirmBtn) return { ok: false, error: '확인 버튼 못찾음' };
 
     clickLikeUser(confirmBtn);
-    await sleep(500); // 모달 닫힘 대기
+    await waitFor(() => !getVisibleDialogs().includes(modal), 3000, 80);
     return { ok: true };
   }
 
@@ -748,7 +761,7 @@
       } catch (e) {
         return { ok: false, error: e?.message || String(e) };
       }
-      await sleep(180);
+      await sleep(150);
     }
     return { ok: false, error: '이미지 업로드 잠금 대기 시간 초과' };
   }
@@ -872,7 +885,7 @@
     };
 
     closeAdImageModals();
-    await sleep(300);
+    await sleep(150);
 
     // 재시도로 들어왔는데 앞 시도에서 이미 붙었을 수 있다.
     // 확인 없이 또 올리면 소재가 2개로 등록되므로 여기서 끝낸다.
@@ -898,7 +911,7 @@
     const btnStart = Date.now();
     while (Date.now() - btnStart < 8000 && !addBtn) {
       addBtn = findAddButton();
-      if (!addBtn) await sleep(250);
+      if (!addBtn) await sleep(100);
     }
     if (!addBtn) return { ok: false, error: '광고 이미지 추가 버튼 못찾음' };
 
@@ -908,7 +921,7 @@
     const modalStart = Date.now();
     while (Date.now() - modalStart < 10000 && !modal) {
       modal = visibleDialogs().find(dlg => /광고\s*이미지\s*추가|광고\s*이미지를\s*선택/.test(dlg.textContent || '')) || null;
-      if (!modal) await sleep(200);
+      if (!modal) await sleep(100);
     }
     if (!modal) return { ok: false, error: '광고 이미지 모달이 안 열림 (네이버 응답 지연)' };
 
@@ -970,7 +983,7 @@
       const sel = tiles.find(t => isTileSelected(t));
       if (!sel) break; // 클래스 기반 감지 실패 시 무한루프 방지
       click(sel);
-      await sleep(200);
+      await sleep(120);
     }
 
     // 2) 업로드 전 타일 키 스냅샷
@@ -1026,7 +1039,7 @@
         stableKey = '';
         stableCount = 0;
       }
-      await sleep(300);
+      await sleep(150);
     }
     if (!newTile) return { ok: false, error: `업로드한 이미지가 보관함에 안 나타남 (${asset.name})` };
 
@@ -1066,7 +1079,7 @@
       if (!stillOpen && (picked === null || picked > pickedBefore)) {
         return { ok: true, name: asset.name };
       }
-      await sleep(300);
+      await sleep(120);
     }
     return { ok: false, error: '이미지를 골랐지만 폼에 반영되지 않음' };
   }
@@ -1178,7 +1191,6 @@
     }
 
     clickLikeUser(select);
-    await sleep(350);
 
     const started = Date.now();
     while (Date.now() - started < 5000) {
@@ -1192,13 +1204,14 @@
         || options.find(el => normalizeText(el.textContent).includes(label));
       if (option) {
         clickLikeUser(option);
-        await sleep(500);
-        const next = normalizeText(select.querySelector('.ad-cms-select-content-value, .ad-cms-select-selection-item')?.textContent || select.textContent);
-        const ok = next.includes(label) || normalizeText(document.body.textContent).includes(label);
+        const readValue = () => normalizeText(
+          select.querySelector('.ad-cms-select-content-value, .ad-cms-select-selection-item')?.textContent
+          || select.textContent);
+        const ok = await waitFor(() => readValue().includes(label), 2500, 80);
         flashEl(select, ok ? '#22c55e' : '#f59e0b');
         return { ok, selected: label, error: ok ? '' : '행동 유도 선택 후 값 확인 실패' };
       }
-      await sleep(200);
+      await sleep(120);
     }
     return { ok: false, error: `"${label}" 옵션 못찾음` };
   }
@@ -1253,7 +1266,9 @@
           lastChipRemoveAt = Date.now(); // 다이얼로그 자동 처리 가드
           removed.push(title);
           didRemove = true;
-          await sleep(750); // 다이얼로그 뜨고 자동 닫히고 DOM 재배열 대기
+          // 다이얼로그가 뜨고 자동으로 닫히고 DOM이 재배열될 때까지 — 끝나는 즉시 진행
+          await waitFor(() => !document.contains(chip), 2500, 80);
+          await sleep(120);
           break; // 한 라운드에 하나만 제거 후 재탐색
         } else {
           failed.push(title + ' (X 버튼 없음)');
@@ -1338,7 +1353,8 @@
       lastChipRemoveAt = Date.now(); // 구성 변경 다이얼로그 자동 확인 가드
       clickLikeUser(removeBtn);
       removed.push(extra.title);
-      await sleep(750);
+      await waitFor(() => !document.contains(extra.el), 2500, 80);
+      await sleep(120);
     }
 
     // 2) 빠진 칩 추가
@@ -1374,14 +1390,13 @@
       await sleep(200);
     }
     closeSelectDropdown(searchInput || select);
-    await sleep(250);
+    await sleep(120);
     return labels;
   }
 
   async function addTemplateChip(select, label) {
     const searchInput = select.querySelector('input.ad-cms-select-input');
     clickLikeUser(searchInput || select);
-    await sleep(350);
 
     const started = Date.now();
     while (Date.now() - started < 5000) {
@@ -1395,13 +1410,13 @@
       if (option) {
         lastChipRemoveAt = Date.now(); // 구성 변경 다이얼로그 자동 확인 가드
         clickLikeUser(option);
-        await sleep(700);
-        const ok = getTemplateChips(select).some(c => chipLabelMatches(c.title, label));
+        const ok = await waitFor(
+          () => getTemplateChips(select).some(c => chipLabelMatches(c.title, label)), 3000, 80);
         closeSelectDropdown(searchInput || select);
-        await sleep(250);
+        await sleep(150);
         return ok;
       }
-      await sleep(200);
+      await sleep(120);
     }
     closeSelectDropdown(searchInput || select);
     return false;
@@ -1458,8 +1473,9 @@
       if (currentTextInputs.length >= slots.length) break;
       const addBtn = findClickableByText(/행동.*유도.*(버튼|추가)/, 30);
       if (addBtn) {
+        const before = currentTextInputs.length;
         addBtn.click();
-        await sleep(400);
+        await waitFor(() => findCtaTextInputs().length > before, 2000, 80);
       } else {
         break;
       }
@@ -1730,9 +1746,9 @@
         if (!el) continue;
         setReactValue(el, expectedValueFor(el, c.value));
         flashEl(el, '#f59e0b');
-        await sleep(150);
+        await sleep(80);
       }
-      await sleep(500);
+      await sleep(250);
     }
     const missing = bad.map(c => c.label);
     if (missing.length) console.warn('[GFA Helper] 검증 실패 항목: ' + missing.join(', '));
@@ -1760,16 +1776,33 @@
     if (!saveBtn) return { ok: false, error: '저장 버튼 못찾음' };
     saveBtn.scrollIntoView?.({ block: 'center', inline: 'center' });
     clickLikeUser(saveBtn);
-    await sleep(300);
+    await sleep(200);
     return { ok: true };
   }
 
   // ============================================================
   // Main autofill orchestrator
   // ============================================================
-  function getStartupDelay(payload) {
-    const type = payload.data?.['소재타입'] || 'image-banner';
-    return type === 'native-image' ? 700 : 200;
+  // 크롬은 백그라운드 탭의 타이머를 1초(오래 두면 1분) 단위로 늦춘다.
+  // 그 상태로 자동입력을 시작하면 모달 대기가 통째로 타임아웃 나므로,
+  // 이 탭이 화면에 올라올 때까지 기다렸다 시작한다.
+  // (백그라운드 워커가 소재 순서대로 탭을 활성화해 준다. 그동안 SPA 로딩은 미리 끝나 있다.)
+  // 창을 최소화하거나 다른 창으로 옮기면 활성 탭이어도 document.hidden이 계속 true라
+  // 화면 표시만 기다리면 영영 시작을 못 한다. 백그라운드가 보내는 "네 차례" 신호도 같이 본다.
+  function waitUntilVisible(maxMs = 30 * 60 * 1000) {
+    if (!document.hidden || startRequested) return Promise.resolve(true);
+    return new Promise(resolve => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        clearInterval(poll);
+        document.removeEventListener('visibilitychange', onChange);
+      };
+      const finish = (value) => { cleanup(); resolve(value); };
+      const onChange = () => { if (!document.hidden) finish(true); };
+      const poll = setInterval(() => { if (startRequested || !document.hidden) finish(true); }, 500);
+      const timer = setTimeout(() => finish(false), maxMs);
+      document.addEventListener('visibilitychange', onChange);
+    });
   }
 
   async function runAutofill(payload) {
@@ -1844,6 +1877,7 @@
   let dismissedCount = 0;
   let lastChipRemoveAt = 0; // 칩 제거 다이얼로그 자동 처리 가드
   let activePayload = null; // 이 탭이 맡은 소재 (저장 전 검증에 사용)
+  let startRequested = false; // 백그라운드가 "이 탭 차례" 신호를 보냈는지
 
   function tryDismissDialog(dlg) {
     const txt = (dlg.textContent || '');
@@ -1940,10 +1974,15 @@
     if (!payload) return; // no hash → just a regular page
     activePayload = payload; // 저장 직전 검증에서 다시 씀
 
-    // 2) 다이얼로그 워처가 초기 정리할 시간 확보 (200ms 폴러 2~3 cycles)
-    await sleep(800);
-    const startupDelay = getStartupDelay(payload);
-    if (startupDelay > 0) await sleep(startupDelay);
+    // 2) 이 탭이 화면에 올라올 때까지 대기 (숨은 탭은 타이머가 늦어 일을 못 함)
+    await waitUntilVisible();
+
+    // 3) 활성 탭이 된 직후 떠 있는 다이얼로그부터 치우고 바로 시작
+    //    (스로틀링이 없는 상태이므로 길게 쉴 필요 없음)
+    for (let i = 0; i < 4; i++) {
+      for (const dlg of findDialogs()) tryDismissDialog(dlg);
+      await sleep(100);
+    }
 
     const results = await runAutofill(payload);
     if (SHOW_FLOATING_PANEL) buildPanel(payload, results);
@@ -1968,6 +2007,11 @@
     }
     if (msg.type === 'ping') {
       sendResponse({ ok: true, href: location.href });
+      return;
+    }
+    if (msg.type === 'startAutofill') {
+      startRequested = true;
+      sendResponse({ ok: true });
       return;
     }
     if (msg.type === 'saveCreative') {

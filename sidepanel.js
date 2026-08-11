@@ -818,23 +818,13 @@ function getSelectedPayloadsWithAssets() {
   return { items, imageAssets };
 }
 
+// Set 직후 타겟만 비운다.
+// 같은 이미지·URL·목적으로 타겟만 갈아끼우며 반복하는 흐름이라 이미지는 그대로 둔다.
+// (타겟이 비면 "소재 Set" 버튼이 타겟 선택을 요구하므로 이전 타겟으로 잘못 도는 사고는 계속 막힌다)
 function clearCurrentGroupFieldsAfterSet() {
   const channel = getActiveChannel();
-  if (channel === 'native') {
-    if ($('urlInput')) $('urlInput').value = '';
-    if ($('purpose')) $('purpose').value = '';
-    updateTargetOptions('purpose', 'target');
-    if ($('bannerCombo')) $('bannerCombo').value = 'discount1-discount2';
-  } else if (channel === 'smart') {
-    if ($('smartUrlInput')) $('smartUrlInput').value = '';
-    if ($('smartPurpose')) $('smartPurpose').value = '';
-    updateTargetOptions('smartPurpose', 'smartTarget');
-  } else if (channel === 'shopping') {
-    if ($('shoppingUrlInput')) $('shoppingUrlInput').value = '';
-    if ($('shoppingTarget')) $('shoppingTarget').value = '';
-    if ($('shoppingBannerCombo')) $('shoppingBannerCombo').value = 'discount-discount';
-  }
-  clearImageFiles();
+  const targetId = channel === 'smart' ? 'smartTarget' : channel === 'shopping' ? 'shoppingTarget' : 'target';
+  if ($(targetId)) $(targetId).value = '';
   updatePreview();
   saveState();
 }
@@ -886,12 +876,31 @@ $('openBatchBtn').addEventListener('click', async () => {
     if (!confirm(`${items.length}개 탭을 한번에 엽니다. 진행할까요?`)) return;
   }
 
+  if ($('batchStatus')) {
+    $('batchStatus').textContent = '탭 여는 중…';
+    $('batchStatus').classList.remove('done');
+  }
   const res = await chrome.runtime.sendMessage({ type: 'openBatch', urlTemplate, items, imageAssets });
   if (res && res.ok) {
     clearCurrentGroupFieldsAfterSet();
-    setStatus(`${res.count}개 탭 열림. 각 탭 우상단 패널에서 자동입력 결과 확인.`);
+    setStatus(`${res.count}개 탭 열림. 탭이 순서대로 자동 전환되며 입력됩니다.`);
   } else {
+    if ($('batchStatus')) $('batchStatus').textContent = '';
     setStatus('탭 열기 실패', true);
+  }
+});
+
+// 백그라운드가 탭을 순서대로 활성화하며 자동입력을 돌린다 — 그 진행 상황 표시
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type !== 'batchProgress') return;
+  const el = $('batchStatus');
+  if (!el) return;
+  if (msg.done) {
+    el.textContent = `자동입력 완료 — ${msg.total}개. 확인 후 "열린 소재 저장"`;
+    el.classList.add('done');
+  } else {
+    el.textContent = `자동입력 진행 중… ${msg.finished + 1} / ${msg.total}`;
+    el.classList.remove('done');
   }
 });
 

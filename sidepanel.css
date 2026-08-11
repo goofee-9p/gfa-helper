@@ -626,6 +626,20 @@ button.danger { color: var(--danger); }
 .preview-row .type-badge.native   { background: #dcfce7; color: #15803d; }
 .preview-row .type-badge.banner   { background: #fef3c7; color: #92400e; }
 .preview-row .type-badge.smart    { background: #dbeafe; color: #1d4ed8; }
+.batch-status {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--panel-soft);
+  border: 1px solid var(--line);
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--navy);
+  text-align: center;
+}
+.batch-status:empty { display: none; }
+.batch-status.done { background: #dcfce7; border-color: #86efac; color: #15803d; }
+
 .preview-row .type-badge.shopping { background: #fce7f3; color: #be185d; }
 .preview-row .type-badge.nativebanner { background: #ede9fe; color: #6d28d9; }
 .preview-row .name .auto-suffix {
