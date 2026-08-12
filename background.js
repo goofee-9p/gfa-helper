@@ -41,6 +41,8 @@ function snapshot() {
       finished: [...b.finished],
       returnTabId: b.returnTabId,
       opening: b.opening,
+      pace: b.pace,
+      activeIdx: b.activeIdx,
     };
   }
   return { batches, uploadLocks, latestOpenedMaterialTabs };
@@ -118,6 +120,7 @@ async function openBatchTabs(batchId) {
       total: batch.items.length,
       imageBatchId: batch.imageBatchId,
       imageAssetIdx: i,
+      pace: batch.pace,
       data: batch.items[i],
     });
     const tab = await chrome.tabs.create({ url, active: false });
@@ -155,6 +158,7 @@ async function activateNext(batchId) {
   }
 
   const tabId = batch.tabIds[next];
+  batch.activeIdx = next;
   try {
     await chrome.tabs.update(tabId, { active: true });
   } catch (e) {
@@ -286,7 +290,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'openBatch') {
     (async () => {
       await hydrate();
-      const { urlTemplate, items, imageAssets = [] } = msg;
+      const { urlTemplate, items, imageAssets = [], pace = 'normal' } = msg;
       const imageBatchId = 'batch_' + Date.now() + '_' + Math.random().toString(36).slice(2);
       await putImages(imageBatchId, imageAssets);
 
@@ -301,6 +305,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         returnTabId: activeTab?.id ?? null,
         opening: true,
         stallTimer: null,
+        pace,
+        activeIdx: null,
       };
       // 이전 배치 탭 목록은 지우지 않고 누적 — 네이티브 열고 스마트채널 열면
       // 앞 배치가 "열린 소재 저장"에서 통째로 빠지던 문제
@@ -316,6 +322,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const batchId = msg.imageBatchId;
       const idx = Number(msg.idx);
       if (batchId && Number.isFinite(idx)) await markFinished(batchId, idx);
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+
+  // 느린 속도에서는 소재 하나가 스톨 타임아웃보다 오래 걸릴 수 있다.
+  // 아직 작업 중이라는 신호를 받으면 타이머를 다시 잡아준다.
+  if (msg.type === 'autofillAlive') {
+    (async () => {
+      await hydrate();
+      const batch = runBatches[msg.imageBatchId];
+      const idx = Number(msg.idx);
+      if (batch && Number.isFinite(idx) && idx === batch.activeIdx && !batch.finished.has(idx)) {
+        clearStall(batch);
+        batch.stallTimer = setTimeout(() => { markFinished(msg.imageBatchId, idx); }, TAB_STALL_MS);
+      }
       sendResponse({ ok: true });
     })();
     return true;

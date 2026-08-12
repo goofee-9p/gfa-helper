@@ -110,7 +110,7 @@ const STATE_KEYS = ['activeChannel', 'promoName', 'promoDate', 'promoCode', 'lan
   'cta1', 'cta2', 'cta3',
   'includeBannerType', 'bannerAdCopy', 'bannerDesc1', 'bannerDesc2', 'bannerDesc3',
   'bannerLongDesc1', 'bannerLongDesc2',
-  'copy'];
+  'copy', 'pace'];
 
 // 네이티브 배너형 전용 문구 — 사이드패널 입력 id ↔ 페이로드 키
 const BANNER_TEXT_FIELDS = [
@@ -153,6 +153,8 @@ async function loadState() {
       if (el && gfaHelperState[k] !== undefined) setFieldValue(el, gfaHelperState[k]);
     }
   }
+  // 저장돼 있던 값이 지금 목록에 없으면(옵션이 바뀐 경우) select가 빈 값이 된다 — 기본값으로 되돌림
+  if ($('pace') && !$('pace').value) $('pace').value = 'normal';
   if (!$('promoName')?.value.trim()) $('promoName').value = '260000-00_프로모션명';
   if (!$('promoCode')?.value.trim()) $('promoCode').value = 'promotion_260000-00';
   const profileName = $('profileName');
@@ -825,6 +827,10 @@ function clearCurrentGroupFieldsAfterSet() {
   const channel = getActiveChannel();
   const targetId = channel === 'smart' ? 'smartTarget' : channel === 'shopping' ? 'shoppingTarget' : 'target';
   if ($(targetId)) $(targetId).value = '';
+  // 캡처한 URL도 비운다 — 앞 광고그룹 URL이 남아 있으면 다음 Set이 통째로 엉뚱한 그룹에 들어간다.
+  // (비면 Set 버튼도 잠기므로 새 광고그룹에서 반드시 다시 캡처하게 됨)
+  const urlInputId = getActiveConfig().urlInputId;
+  if (urlInputId && $(urlInputId)) $(urlInputId).value = '';
   updatePreview();
   saveState();
 }
@@ -880,10 +886,12 @@ $('openBatchBtn').addEventListener('click', async () => {
     $('batchStatus').textContent = '탭 여는 중…';
     $('batchStatus').classList.remove('done');
   }
-  const res = await chrome.runtime.sendMessage({ type: 'openBatch', urlTemplate, items, imageAssets });
+  const pace = $('pace')?.value || 'normal';
+  const res = await chrome.runtime.sendMessage({ type: 'openBatch', urlTemplate, items, imageAssets, pace });
   if (res && res.ok) {
     clearCurrentGroupFieldsAfterSet();
-    setStatus(`${res.count}개 탭 열림. 탭이 순서대로 자동 전환되며 입력됩니다.`);
+    const paceLabel = pace === 'fast' ? ' (빠르게)' : pace === 'turbo' ? ' (더 빠르게)' : '';
+    setStatus(`${res.count}개 탭 열림${paceLabel}. 타겟·URL은 비웠으니 다음 그룹에서 다시 캡처하세요.`);
   } else {
     if ($('batchStatus')) $('batchStatus').textContent = '';
     setStatus('탭 열기 실패', true);

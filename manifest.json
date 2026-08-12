@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GFA 소재 세팅하는 고라니",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "네이버 GFA 소재 등록 시 텍스트/URL 자동입력 및 이미지 경로 관리 보조",
   "permissions": ["storage", "sidePanel", "activeTab", "scripting", "clipboardWrite", "tabs"],
   "host_permissions": [

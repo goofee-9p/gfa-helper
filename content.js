@@ -30,6 +30,42 @@
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   const normalizeText = (s) => (s || '').replace(/\s+/g, ' ').trim();
 
+  // ============================================================
+  // 진행 속도 (pace)
+  // 깨지는 건 "클릭"이다 — GFA가 목록을 다시 그리는 중에 타일이나 확인 버튼을
+  // 누르면 선택이 통째로 씹힌다. 반면 파일을 올리고 응답을 기다리는 구간은
+  // 준비되는 즉시 넘어가야 한다. 그래서 대기를 성격별로 나눠 쓴다.
+  //
+  //   poll   — "네이버가 응답했나" 확인 간격. 짧게 고정, 속도 설정과 무관.
+  //   settle — 클릭 전후로 일부러 쉬는 시간. 속도 설정이 붙는 곳.
+  //   limit  — 타임아웃. 실패할 때만 의미가 있으니 넉넉하게.
+  // ============================================================
+  const PACE_FACTORS = { turbo: 0.5, fast: 1, normal: 1.8 };
+  let paceFactor = PACE_FACTORS.normal;
+  const POLL_MS = 130;
+  const settle = (ms) => Math.round(ms * paceFactor);
+  const limit = (ms) => Math.round(ms * Math.max(1.5, paceFactor));
+
+  // 값이 stableMs 동안 그대로일 때까지 기다린다.
+  // (계속 바뀌는 중에 스냅샷을 뜨면 뒤늦게 그려진 것들을 "새로 생긴 것"으로 오인한다)
+  async function waitUntilStable(getSignature, { stableMs, maxMs, step = 200 }) {
+    const start = Date.now();
+    let last = null;
+    let since = Date.now();
+    while (Date.now() - start < maxMs) {
+      let sig = '';
+      try { sig = String(getSignature()); } catch (e) { sig = ''; }
+      if (sig !== last) {
+        last = sig;
+        since = Date.now();
+      } else if (Date.now() - since >= stableMs) {
+        return true;
+      }
+      await sleep(step);
+    }
+    return false;
+  }
+
   // 조건이 만족될 때까지 짧게 폴링.
   // 자동입력은 항상 "활성 탭"에서만 돌기 때문에 타이머가 늦춰지지 않아
   // 고정 대기(sleep) 대신 짧은 간격으로 확인하는 편이 훨씬 빠르다.
@@ -817,19 +853,24 @@
     try {
       // 네이버 응답 속도가 그때그때 달라 한 번에 성공하지 못하는 경우가 잦다.
       // 모달을 완전히 닫고 처음부터 다시, 갈수록 더 오래 기다리며 재시도.
+      // 앞 시도에서 올라간 이미지는 키를 넘겨 재사용한다 (재업로드 = 보관함에 중복 누적).
       let lastError = '';
+      let knownTileKey = '';
       for (let attempt = 1; attempt <= 3; attempt++) {
-        const res = await uploadAndPickAdImage(asset);
+        const res = await uploadAndPickAdImage(asset, { knownTileKey });
         if (res.ok) return res;
+        if (res.tileKey) knownTileKey = res.tileKey;
         lastError = res.error || '알 수 없는 오류';
         console.warn(`[GFA Helper] 광고 이미지 ${attempt}/3 실패: ${lastError}`);
         closeAdImageModals();
-        await sleep(1000 + attempt * 900);
+        await sleep(settle(1200) + attempt * settle(1000));
       }
       return { ok: false, error: `${lastError} (3회 재시도 후 실패)` };
     } finally {
       stopUploadHeartbeat(heartbeat);
       await releaseUploadLock(uploadLock);
+      // 실패로 끝나도 모달은 반드시 닫는다 — 열린 채로 남으면 저장 버튼까지 가려진다
+      closeAdImageModals();
     }
   }
 
@@ -876,7 +917,7 @@
     return root.querySelectorAll('img').length;
   }
 
-  async function uploadAndPickAdImage(asset) {
+  async function uploadAndPickAdImage(asset, { knownTileKey = '' } = {}) {
     const isVisible = isElVisible;
     const visibleDialogs = () => Array.from(findDialogs()).filter(isVisible);
     const click = (el) => {
@@ -885,7 +926,7 @@
     };
 
     closeAdImageModals();
-    await sleep(150);
+    await sleep(settle(300));
 
     // 재시도로 들어왔는데 앞 시도에서 이미 붙었을 수 있다.
     // 확인 없이 또 올리면 소재가 2개로 등록되므로 여기서 끝낸다.
@@ -909,9 +950,9 @@
     // 폼이 아직 그려지는 중일 수 있으므로 버튼도 기다렸다 찾는다
     let addBtn = null;
     const btnStart = Date.now();
-    while (Date.now() - btnStart < 8000 && !addBtn) {
+    while (Date.now() - btnStart < limit(8000) && !addBtn) {
       addBtn = findAddButton();
-      if (!addBtn) await sleep(100);
+      if (!addBtn) await sleep(POLL_MS);
     }
     if (!addBtn) return { ok: false, error: '광고 이미지 추가 버튼 못찾음' };
 
@@ -919,17 +960,26 @@
 
     let modal = null;
     const modalStart = Date.now();
-    while (Date.now() - modalStart < 10000 && !modal) {
+    while (Date.now() - modalStart < limit(10000) && !modal) {
       modal = visibleDialogs().find(dlg => /광고\s*이미지\s*추가|광고\s*이미지를\s*선택/.test(dlg.textContent || '')) || null;
-      if (!modal) await sleep(100);
+      if (!modal) await sleep(POLL_MS);
     }
     if (!modal) return { ok: false, error: '광고 이미지 모달이 안 열림 (네이버 응답 지연)' };
 
-    const input = modal.querySelector('input[type="file"]');
-    if (!input) return { ok: false, error: '광고 이미지 파일 input 못찾음' };
-
-    const getTiles = () => Array.from(modal.querySelectorAll('.css-3hsv0d'))
-      .filter(tile => isVisible(tile));
+    const getTiles = () => {
+      const byClass = Array.from(modal.querySelectorAll('.css-3hsv0d')).filter(isVisible);
+      if (byClass.length) return byClass;
+      // 클래스명이 바뀌면 여기가 통째로 빈다 — 썸네일 img를 감싼 요소를 타일로 본다
+      const seen = new Set();
+      const fallback = [];
+      for (const img of Array.from(modal.querySelectorAll('img')).filter(isVisible)) {
+        const tile = img.closest('li, [role="option"], [class*="item" i], [class*="thumb" i]') || img.parentElement;
+        if (!tile || seen.has(tile)) continue;
+        seen.add(tile);
+        fallback.push(tile);
+      }
+      return fallback;
+    };
     const getTilesByPosition = () => getTiles().sort((a, b) => {
       const ra = a.getBoundingClientRect();
       const rb = b.getBoundingClientRect();
@@ -953,9 +1003,13 @@
         tile.textContent || '',
       ].join(' ')).toLowerCase();
     };
+    // 모달 우상단 "선택된 파일 1/5543" — 여기서 앞 숫자가 선택 개수.
+    // 클래스명(css-xxxx)은 GFA 배포마다 바뀌므로 화면에 보이는 문구로 먼저 읽는다.
     const getCount = () => {
-      const count = (modal.querySelector('.css-vo6spr')?.textContent || '').trim();
-      return /^\d+$/.test(count) ? parseInt(count, 10) : 0;
+      const m = normalizeText(modal.textContent || '').match(/선택된\s*파일\s*(\d+)\s*\/\s*\d+/);
+      if (m) return parseInt(m[1], 10);
+      const legacy = (modal.querySelector('.css-vo6spr')?.textContent || '').trim();
+      return /^\d+$/.test(legacy) ? parseInt(legacy, 10) : 0;
     };
     const getUploadError = () => {
       const text = normalizeText(modal.textContent || '');
@@ -964,17 +1018,28 @@
       if (/업로드에 실패했습니다|비율에 맞는 이미지/.test(text)) return text;
       return '';
     };
+    // 선택 표시는 타일 자신이 아니라 타일을 감싼 요소에 붙기도 한다 (프로필 이미지 쪽과 동일하게 위로 훑는다)
     const isTileSelected = (tile) => {
       if (!tile) return false;
-      if (/selected/i.test(String(tile.className || ''))) return true;
-      if (tile.getAttribute('aria-checked') === 'true') return true;
-      if (tile.getAttribute('aria-selected') === 'true') return true;
+      let p = tile;
+      for (let d = 0; d < 3 && p; d++, p = p.parentElement) {
+        if (/\b(selected|active|checked)/i.test(String(p.className || ''))) return true;
+        if (p.getAttribute?.('aria-selected') === 'true' || p.getAttribute?.('aria-checked') === 'true') return true;
+      }
+      if (tile.querySelector('input[type="checkbox"]:checked, input[type="radio"]:checked')) return true;
       // 체크마크/선택 아이콘 자식 element
-      if (tile.querySelector('[class*="checked" i], [class*="selected" i]')) return true;
-      return false;
+      return !!tile.querySelector('[class*="checked" i], [class*="selected" i]');
     };
 
-    // 1) 모달 안에 이미 선택된 타일(이전 캐시) 전부 해제
+    // 1) 목록 맨 앞줄이 자리 잡을 때까지만 기다린다.
+    //    보관함이 수천 장이라 스크롤하며 계속 불러오고, "전체가 안정되는 시점"은 오지 않는다.
+    //    (전체를 기다리면 매번 타임아웃까지 몇십 초를 그냥 버린다)
+    //    업로드한 이미지는 맨 앞에 붙으므로 앞줄만 확실하면 된다.
+    const headKeys = () => getTilesByPosition().slice(0, 8).map(getTileKey).join('~');
+    await waitFor(() => getTiles().length > 0, limit(8000), POLL_MS);
+    await waitUntilStable(headKeys, { stableMs: 400, maxMs: limit(5000), step: POLL_MS });
+
+    // 2) 모달 안에 이미 선택된 타일(이전 캐시) 전부 해제
     //    안 그러면 새 이미지 클릭 후 확인 누를 때 기존 선택된 게 같이 들어감
     let deselectSafety = 0;
     while (deselectSafety++ < 30) {
@@ -983,11 +1048,81 @@
       const sel = tiles.find(t => isTileSelected(t));
       if (!sel) break; // 클래스 기반 감지 실패 시 무한루프 방지
       click(sel);
-      await sleep(120);
+      await sleep(settle(200));
     }
 
-    // 2) 업로드 전 타일 키 스냅샷
+    // 3) 고른 타일을 실제로 소재에 붙이는 구간 — 여기부터가 "클릭"이라 천천히 간다
+    const pickTile = async (tile) => {
+      const tileKey = getTileKey(tile);
+
+      // 썸네일이 뜨자마자 누르면 GFA가 아직 목록을 다시 그리는 중이라 선택이 씹힌다
+      await sleep(settle(700));
+
+      if (!isTileSelected(tile)) {
+        click(tile);
+        const selectStart = Date.now();
+        while (Date.now() - selectStart < limit(4000) && !isTileSelected(tile) && getCount() === 0) {
+          await sleep(POLL_MS);
+        }
+        await sleep(settle(400));
+      }
+
+      // 검증 — 선택된 게 정확히 우리 타일 1개여야 함
+      if (getCount() === 0 || !isTileSelected(tile)) {
+        return { ok: false, error: '업로드 이미지 선택 실패', tileKey };
+      }
+      // 다른 타일이 또 선택되어 있으면(우리 deselect가 빠뜨린 캐시) 해제 시도
+      let extraSafety = 0;
+      while (extraSafety++ < 20) {
+        const selectedOthers = getTiles().filter(t => t !== tile && isTileSelected(t));
+        if (selectedOthers.length === 0) break;
+        click(selectedOthers[0]);
+        await sleep(settle(200));
+      }
+      if (!isTileSelected(tile)) return { ok: false, error: '새 이미지 선택 상태가 해제됨', tileKey };
+
+      // 선택 상태가 GFA 내부에 반영될 시간을 준 뒤 확인
+      await sleep(settle(600));
+      const okBtn = Array.from(modal.querySelectorAll('button'))
+        .find(b => /^확인$/.test(normalizeText(b.textContent)) && !b.disabled);
+      if (!okBtn) return { ok: false, error: '광고 이미지 확인 버튼 못찾음', tileKey };
+      click(okBtn);
+
+      // 모달이 닫혔다고 폼에 반영된 건 아니다 — 실제로 썸네일이 붙었는지까지 확인
+      const applyStart = Date.now();
+      while (Date.now() - applyStart < limit(10000)) {
+        const stillOpen = visibleDialogs().some(dlg => /광고\s*이미지\s*추가/.test(dlg.textContent || ''));
+        const picked = countPickedAdImages();
+        if (!stillOpen && (picked === null || picked > pickedBefore)) {
+          // 다음 단계(다른 입력칸/저장)로 바로 넘어가면 폼이 다시 그려지며 썸네일이 날아가기도 한다
+          await sleep(settle(500));
+          return { ok: true, name: asset.name };
+        }
+        await sleep(POLL_MS);
+      }
+      return { ok: false, error: '이미지를 골랐지만 폼에 반영되지 않음', tileKey };
+    };
+
+    // 4) 앞 시도에서 이미 올려둔 게 있으면 또 올리지 않는다 — 재시도할 때마다 올리면
+    //    보관함에 같은 이미지가 계속 쌓이고, 어느 게 내 것인지도 흐려진다
+    if (knownTileKey) {
+      const already = getTiles().find(t => getTileKey(t) === knownTileKey);
+      if (already) {
+        console.log('[GFA Helper] 앞 시도에서 올린 이미지 재사용:', asset.name);
+        return pickTile(already);
+      }
+    }
+
+    // 5) 업로드 전 타일 키 스냅샷
     const beforeKeys = new Set(getTiles().map(getTileKey).filter(Boolean));
+
+    // 파일 input은 모달이 다 그려진 뒤에 붙는 경우가 있어 이 시점에 다시 찾는다
+    let input = null;
+    await waitFor(() => {
+      input = modal.querySelector('input[type="file"]');
+      return !!input;
+    }, limit(5000), POLL_MS);
+    if (!input) return { ok: false, error: '광고 이미지 파일 input 못찾음' };
 
     const file = dataUrlToFile(asset.dataUrl, asset.name, asset.type);
     const dt = new DataTransfer();
@@ -996,15 +1131,18 @@
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.dispatchEvent(new Event('change', { bubbles: true }));
 
-    // 업로드 직후 보관함에 새로 생긴 타일 중에서 내 것을 고른다.
-    // 1순위: 파일명이 일치하는 타일 / 2순위: 새로 생긴 것 중 좌상단
+    // 6) 올라왔는지 짧은 간격으로 확인만 한다 — 고정 대기 없이 뜨는 즉시 진행.
+    //    새로 생긴 타일 중 1순위는 파일명이 일치하는 것, 2순위는 좌상단
     // (업로드는 배치 전체에서 한 번에 하나씩만 돌기 때문에 새 타일은 사실상 내 것뿐)
     const wantedName = String(asset.name || '').replace(/\.[a-z0-9]+$/i, '').trim().toLowerCase();
+    // 썸네일이 잠깐 떴다가 다시 그려지는 일이 잦아, 같은 타일이 연속으로 잡힐 때만 확정한다
+    const NEEDED_STABLE = 3;
     let newTile = null;
     let stableKey = '';
     let stableCount = 0;
     const uploadStart = Date.now();
-    while (Date.now() - uploadStart < 60000) {
+    const uploadMaxMs = Math.min(limit(45000), 90000);
+    while (Date.now() - uploadStart < uploadMaxMs) {
       const uploadError = getUploadError();
       if (uploadError) {
         return { ok: false, error: `광고 이미지 업로드 실패: ${asset.name} / ${uploadError}` };
@@ -1013,7 +1151,8 @@
         const key = getTileKey(tile);
         if (!key || beforeKeys.has(key)) return false;
         const img = tile.querySelector('img');
-        return !!(img?.complete && (img.currentSrc || img.src));
+        // naturalWidth까지 봐야 "주소만 붙고 아직 못 받은" 썸네일을 거른다
+        return !!(img?.complete && img.naturalWidth > 0 && (img.currentSrc || img.src));
       });
       const candidate = (wantedName && fresh.find(tile => getTileName(tile).includes(wantedName)))
         || fresh.sort((a, b) => {
@@ -1031,7 +1170,7 @@
           stableKey = key;
           stableCount = 1;
         }
-        if (stableCount >= 2) {
+        if (stableCount >= NEEDED_STABLE) {
           newTile = candidate;
           break;
         }
@@ -1039,49 +1178,11 @@
         stableKey = '';
         stableCount = 0;
       }
-      await sleep(150);
+      await sleep(POLL_MS);
     }
     if (!newTile) return { ok: false, error: `업로드한 이미지가 보관함에 안 나타남 (${asset.name})` };
 
-    // 3) 새 타일이 자동 선택 안 됐으면 클릭으로 선택
-    if (!isTileSelected(newTile)) {
-      click(newTile);
-      const selectStart = Date.now();
-      while (Date.now() - selectStart < 3000 && !isTileSelected(newTile) && getCount() === 0) {
-        await sleep(150);
-      }
-    }
-
-    // 4) 검증 — 선택된 타일이 정확히 우리 새 타일 1개여야 함
-    if (getCount() === 0 || !isTileSelected(newTile)) {
-      return { ok: false, error: '업로드 이미지 선택 실패' };
-    }
-    // 만약 다른 타일이 또 선택되어 있으면(우리 deselect가 빠뜨린 캐시) 해제 시도
-    let extraSafety = 0;
-    while (extraSafety++ < 20) {
-      const tiles = getTiles();
-      const selectedOthers = tiles.filter(t => t !== newTile && isTileSelected(t));
-      if (selectedOthers.length === 0) break;
-      click(selectedOthers[0]);
-      await sleep(150);
-    }
-    if (!isTileSelected(newTile)) return { ok: false, error: '새 이미지 선택 상태가 해제됨' };
-
-    const okBtn = Array.from(modal.querySelectorAll('button')).find(b => /^확인$/.test(normalizeText(b.textContent)) && !b.disabled);
-    if (!okBtn) return { ok: false, error: '광고 이미지 확인 버튼 못찾음' };
-    click(okBtn);
-
-    // 모달이 닫혔다고 폼에 반영된 건 아니다 — 실제로 썸네일이 붙었는지까지 확인
-    const applyStart = Date.now();
-    while (Date.now() - applyStart < 10000) {
-      const stillOpen = visibleDialogs().some(dlg => /광고\s*이미지\s*추가/.test(dlg.textContent || ''));
-      const picked = countPickedAdImages();
-      if (!stillOpen && (picked === null || picked > pickedBefore)) {
-        return { ok: true, name: asset.name };
-      }
-      await sleep(120);
-    }
-    return { ok: false, error: '이미지를 골랐지만 폼에 반영되지 않음' };
+    return pickTile(newTile);
   }
 
   // ============================================================
@@ -1805,6 +1906,18 @@
     });
   }
 
+  // 백그라운드는 응답 없는 탭을 2분 뒤 완료 처리하고 다음 탭으로 넘어간다.
+  // 느린 속도에서는 업로드 한 번이 그보다 오래 걸릴 수 있어 "아직 하는 중"이라고 알린다.
+  function startAliveHeartbeat(payload) {
+    const send = () => chrome.runtime.sendMessage({
+      type: 'autofillAlive',
+      imageBatchId: payload.imageBatchId,
+      idx: payload.idx,
+    }).catch(() => {});
+    send();
+    return setInterval(send, 20000);
+  }
+
   async function runAutofill(payload) {
     const d = payload.data || {};
     d.__imageBatchId = payload.imageBatchId;
@@ -1819,7 +1932,7 @@
     if (!sel.ok) {
       console.warn('[GFA Helper] 소재타입 선택 실패:', sel.error);
       // 1초 후 1회 더 시도
-      await sleep(1000);
+      await sleep(settle(1000));
       const sel2 = await selectCreativeType(type);
       if (!sel2.ok) {
         console.error('[GFA Helper] 라디오 최종 실패 — 자동입력 중단:', sel2.error);
@@ -1973,6 +2086,7 @@
     const payload = decodePayload();
     if (!payload) return; // no hash → just a regular page
     activePayload = payload; // 저장 직전 검증에서 다시 씀
+    if (PACE_FACTORS[payload.pace]) paceFactor = PACE_FACTORS[payload.pace];
 
     // 2) 이 탭이 화면에 올라올 때까지 대기 (숨은 탭은 타이머가 늦어 일을 못 함)
     await waitUntilVisible();
@@ -1984,7 +2098,17 @@
       await sleep(100);
     }
 
-    const results = await runAutofill(payload);
+    const alive = startAliveHeartbeat(payload);
+    let results = {};
+    try {
+      results = await runAutofill(payload);
+    } catch (e) {
+      // 여기서 막히면 배치가 스톨 타임아웃(2분)을 다 기다렸다 넘어간다 — 바로 다음 탭으로
+      console.error('[GFA Helper] 자동입력 중 오류:', e);
+      results = { _error: e?.message || String(e) };
+    } finally {
+      clearInterval(alive);
+    }
     if (SHOW_FLOATING_PANEL) buildPanel(payload, results);
     chrome.runtime.sendMessage({
       type: 'autofillDone',

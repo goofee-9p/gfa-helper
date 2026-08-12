@@ -199,7 +199,8 @@ textarea { resize: vertical; min-height: 52px; line-height: 1.55; }
 
 label.row { display: flex; align-items: center; gap: 9px; margin-bottom: 7px; }
 label.row > span { width: 88px; flex-shrink: 0; margin: 0; font-weight: 700; }
-label.row > input { flex: 1; }
+label.row > input,
+label.row > select { flex: 1; min-width: 0; }
 
 .check-row {
   display: flex;
