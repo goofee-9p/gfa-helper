@@ -486,7 +486,17 @@
   }
 
   async function fillProfileName(value) {
-    return fillInputUntilStable(findProfileNameInput, value, '프로필 이름', 5000);
+    if (!value) return null;
+    // 일부 네이티브/이미지 배너 구성에는 프로필 이미지뿐이고 이름 입력칸은 없다.
+    // 없는 필드를 5초 동안 찾느라 로고 선택으로 넘어가는 구간이 느려지지 않게 한다.
+    const hasProfileNameLabel = Array.from(document.querySelectorAll('label, span, div, p, strong'))
+      .some(el => {
+        const rect = el.getBoundingClientRect();
+        const text = normalizeText(el.textContent);
+        return rect.width > 0 && rect.height > 0 && text.length <= 40 && /^\*?\s*프로필\s*이름$/.test(text);
+      });
+    if (!findProfileNameInput() && !hasProfileNameLabel) return null;
+    return fillInputUntilStable(findProfileNameInput, value, '프로필 이름', 2500);
   }
 
   // ============================================================
@@ -496,6 +506,10 @@
   // 3) 첫 번째 썸네일 클릭
   // 4) 확인 버튼 클릭
   // ============================================================
+  // 로고는 업로드가 아니라 "이미 보관함에 있는 첫 이미지 선택"이라 기다릴 게 없다.
+  // 네이버 응답을 확인하는 간격만 짧게 잡고, 준비되는 즉시 다음 단계로 넘어간다.
+  const PICK_POLL_MS = 40;
+
   async function selectProfileImageWithRetry() {
     let lastError = '';
     for (let attempt = 1; attempt <= 2; attempt++) {
@@ -503,7 +517,7 @@
       if (result.ok) return result;
       lastError = result.error || '알 수 없는 오류';
       console.log(`[GFA Helper] 프로필 이미지 선택 ${attempt}차 실패: ${lastError}`);
-      await sleep(400);
+      await sleep(250);
     }
     return { ok: false, error: lastError };
   }
@@ -613,11 +627,16 @@
       if (closeBtn) closeBtn.click();
     }
 
-    for (const dlg of getVisibleDialogs()) {
-      if (/광고\s*이미지\s*추가/.test(dlg.textContent || '')) {
-        closeDialog(dlg);
-        await sleep(150);
-      }
+    const staleDialog = getVisibleDialogs().find(dlg => {
+      const text = dlg.textContent || '';
+      return /광고\s*이미지\s*추가|프로필\s*이미지를\s*선택|이미지\s*선택/.test(text)
+        && !!dlg.querySelector('[aria-label="Close"], [aria-label="close"], button');
+    });
+    // 재시도에 들어왔을 때 이전 프로필 모달이 남아 있으면 뒤에 새 모달이
+    // 겹쳐 열리고, 빈 모달을 고르는 문제가 생긴다. 항상 한 장만 열어 둔다.
+    if (staleDialog) {
+      closeDialog(staleDialog);
+      await waitFor(() => !getVisibleDialogs().includes(staleDialog), 1200, PICK_POLL_MS);
     }
 
     // 1) "프로필 이미지" 영역 안의 이미지 추가 버튼만 클릭. 광고 이미지 추가로 fallback하지 않음.
@@ -625,24 +644,29 @@
     const buttonStart = Date.now();
     while (Date.now() - buttonStart < 5000 && !addBtn) {
       addBtn = findProfileImageAddButton();
-      if (!addBtn) await sleep(100);
+      if (!addBtn) await sleep(PICK_POLL_MS);
     }
     if (!addBtn) return { ok: false, error: '이미지 추가 버튼 못찾음: ' + (describeImageAddCandidates() || '후보 없음') };
 
     clickLikeUser(addBtn);
     flashEl(addBtn, '#3b82f6');
-    await sleep(120);
 
-    // 2) "이미지 선택" 모달 찾기
+    // 2) "이미지 선택" 모달 찾기 — 고정 대기 없이 뜨는 즉시 진행
+    // 같은 모달이 root/wrap/header 등 중첩 노드로 셀렉터에 여러 번 걸린다.
+    // 안쪽 조각(header 등)을 잡으면 썸네일·확인 버튼이 그 밖이라 못 찾으므로
+    // 바깥 노드만 남기고, 여러 모달이 겹쳐 있으면 마지막(최신) 것을 쓴다.
     let modal = null;
     const start = Date.now();
     while (Date.now() - start < 5000 && !modal) {
-      const modals = getVisibleDialogs();
-      modal = modals.find(dlg => {
+      const candidates = getVisibleDialogs().filter(dlg => {
         const txt = dlg.textContent || '';
-        return /프로필\s*이미지|로고|이미지\s*선택/.test(txt) && !/광고\s*이미지\s*추가/.test(txt);
-      }) || null;
-      if (!modal) await sleep(100);
+        return /프로필\s*이미지를\s*선택|프로필\s*이미지|로고/.test(txt)
+          && !/광고\s*이미지\s*추가/.test(txt);
+      });
+      const outermost = candidates.filter(dlg =>
+        !candidates.some(other => other !== dlg && other.contains(dlg)));
+      modal = outermost[outermost.length - 1] || null;
+      if (!modal) await sleep(PICK_POLL_MS);
     }
     if (!modal) return { ok: false, error: '이미지 선택 모달 못찾음' };
     if (/광고\s*이미지\s*추가/.test(modal.textContent || '')) {
@@ -674,8 +698,8 @@
       const start = Date.now();
       while (Date.now() - start < 1800) {
         const selectedCount = getSelectedFileCount();
-        if (selectedCount === null || selectedCount > 0 || isTileSelected(tile)) return true;
-        await sleep(120);
+        if ((selectedCount !== null && selectedCount > 0) || isTileSelected(tile)) return true;
+        await sleep(PICK_POLL_MS);
       }
       return false;
     };
@@ -702,30 +726,22 @@
       return best;
     };
 
-    // 3) 첫 번째 보이는 로고/썸네일 클릭
+    // 3) 모달 골격이 먼저 뜨고 썸네일은 뒤늦게 로드된다. 이미지가 실제로
+    // 나타나는 즉시 진행하되, 로드 전 빈 목록을 실패로 판정하지 않는다.
     let firstThumb = null;
     let clickTargets = [];
-    const imgs = Array.from(modal.querySelectorAll('img')).filter(img => {
-      const rect = img.getBoundingClientRect();
-      return isVisible(img) && rect.width >= 30 && rect.height >= 30;
-    }).sort((a, b) => imageScore(a) - imageScore(b));
+    let imgs = [];
+    await waitFor(() => {
+      imgs = Array.from(modal.querySelectorAll('img')).filter(img => {
+        const rect = img.getBoundingClientRect();
+        return isVisible(img) && rect.width >= 30 && rect.height >= 30;
+      }).sort((a, b) => imageScore(a) - imageScore(b));
+      return imgs.length > 0;
+    }, 3000, PICK_POLL_MS);
     for (const img of imgs) {
-      let p = img.parentElement;
-      let candidate = findImageTile(img);
-      const targets = [img];
-      let blocked = false;
-      for (let d = 0; d < 5 && p; d++, p = p.parentElement) {
-        const txt = (p.textContent || '').trim();
-        if (/업로드|추가/.test(txt) && !/로고|이미지\s*선택/.test(txt)) blocked = true;
-        targets.push(p);
-        if (['LI', 'LABEL', 'BUTTON'].includes(p.tagName) || p.getAttribute('role') === 'button') {
-          candidate = p;
-        }
-      }
-      if (blocked) continue;
       firstThumb = img;
-      const tile = findImageTile(img);
-      clickTargets = [tile, candidate].filter((el, idx, arr) => el && arr.indexOf(el) === idx);
+      const tile = img.closest('.css-3hsv0d, li, [role="option"], label, button') || findImageTile(img);
+      clickTargets = [tile, img].filter((el, idx, arr) => el && arr.indexOf(el) === idx);
       break;
     }
     if (!firstThumb) return { ok: false, error: '썸네일 못찾음' };
@@ -754,12 +770,13 @@
         const text = (b.textContent || '').trim();
         return /^확인$/.test(text) && !b.disabled && isVisible(b);
       });
-      if (!confirmBtn) await sleep(100);
+      if (!confirmBtn) await sleep(PICK_POLL_MS);
     }
     if (!confirmBtn) return { ok: false, error: '확인 버튼 못찾음' };
 
     clickLikeUser(confirmBtn);
-    await waitFor(() => !getVisibleDialogs().includes(modal), 3000, 80);
+    const closed = await waitFor(() => !getVisibleDialogs().includes(modal), 3000, PICK_POLL_MS);
+    if (!closed) return { ok: false, error: '확인 후 프로필 이미지 모달이 닫히지 않음' };
     return { ok: true };
   }
 
@@ -1330,6 +1347,7 @@
   async function removeChips(labels) {
     const removed = [];
     const failed = [];
+    const attemptedRemovals = new Set();
     const normalize = (s) => (s || '').replace(/\s+/g, '').replace(/[()（）]/g, '').trim();
     const targets = labels.map(normalize);
     const isTargetChip = (title) => {
@@ -1356,19 +1374,51 @@
 
     // 여러 라운드 — 제거하면 다이얼로그 뜨고 DOM 재배열될 수 있어서 안전하게
     for (let round = 0; round < 10; round++) {
-      const chips = Array.from(document.querySelectorAll('.ad-cms-select-selection-item'));
+      const select = findTemplateSelect();
+      if (!select) {
+        failed.push('소재 유형 셀렉트 못찾음');
+        break;
+      }
+      const chips = getTemplateChips(select).map(c => c.el);
+      // 마지막 남은 칩까지 지우면 소재 유형이 0개가 돼 GFA가 값을 되돌린다.
+      // (지우면 다시 생기고, 다시 지우고… 화면상 계속 왔다갔다 하는 원인)
+      if (chips.length <= 1) {
+        if (chips.length === 1) {
+          const onlyTitle = chips[0].getAttribute('title') ||
+            (chips[0].querySelector('.ad-cms-select-selection-item-content')?.textContent || '').trim();
+          if (isTargetChip(onlyTitle)) failed.push(`${onlyTitle} (마지막 소재 유형이라 제거 안 함)`);
+        }
+        break;
+      }
       let didRemove = false;
       for (const chip of chips) {
         const title = chip.getAttribute('title') ||
                       (chip.querySelector('.ad-cms-select-selection-item-content')?.textContent || '').trim();
         if (!isTargetChip(title)) continue;
 
+        const removalKey = normalize(title);
+        if (attemptedRemovals.has(removalKey)) {
+          failed.push(`${title} (제거 후 다시 나타남)`);
+          break;
+        }
+
+        // 클릭과 동시에 다이얼로그가 생길 수 있으므로 가드를 클릭 전에 설정한다.
+        attemptedRemovals.add(removalKey);
+        lastChipRemoveAt = Date.now();
         if (clickRemove(chip)) {
-          lastChipRemoveAt = Date.now(); // 다이얼로그 자동 처리 가드
-          removed.push(title);
           didRemove = true;
-          // 다이얼로그가 뜨고 자동으로 닫히고 DOM이 재배열될 때까지 — 끝나는 즉시 진행
-          await waitFor(() => !document.contains(chip), 2500, 80);
+          // 하단 폼 전체가 다시 그려진 것만 보고 성공 처리하지 않고, 새 DOM에서
+          // 해당 칩이 실제로 빠졌는지 확인한다.
+          const didDisappear = await waitFor(() => {
+            const liveSelect = findTemplateSelect();
+            return !!liveSelect && !getTemplateChips(liveSelect).some(c => isTargetChip(c.title) && normalize(c.title) === removalKey);
+          }, 5000, 80);
+          if (!didDisappear) {
+            failed.push(`${title} (제거 확인 실패)`);
+            didRemove = false;
+            break;
+          }
+          removed.push(title);
           await sleep(120);
           break; // 한 라운드에 하나만 제거 후 재탐색
         } else {
@@ -1380,9 +1430,8 @@
 
     if (removed.length) console.log('[GFA Helper] 칩 제거: ' + removed.join(', '));
     if (failed.length) console.log('[GFA Helper] 칩 제거 실패: ' + failed.join(', '));
-    const remaining = Array.from(document.querySelectorAll('.ad-cms-select-selection-item'))
-      .map(chip => chip.getAttribute('title') ||
-        (chip.querySelector('.ad-cms-select-selection-item-content')?.textContent || '').trim())
+    const remaining = getTemplateChips(findTemplateSelect())
+      .map(chip => chip.title)
       .filter(isTargetChip);
     return { removed, failed, remaining };
   }
@@ -1403,14 +1452,23 @@
   };
 
   function findTemplateSelect() {
-    return document.querySelector('.ad-cms-select[name="checkedTemplates"]')
-      || document.getElementById('$.checkedTemplates')?.querySelector('.ad-cms-select')
-      || document.querySelector('.ad-cms-select-multiple')
-      || null;
+    const exact = document.querySelector('.ad-cms-select[name="checkedTemplates"]')
+      || document.getElementById('$.checkedTemplates')?.querySelector('.ad-cms-select');
+    if (exact) return exact;
+
+    // name/id가 없는 렌더링도 있지만, 다른 멀티셀렉트까지 집으면 엉뚱한 칩을
+    // 지울 수 있으므로 소재 유형으로 확인되는 셀렉트만 fallback으로 허용한다.
+    return Array.from(document.querySelectorAll('.ad-cms-select-multiple')).find(candidate => {
+      const chipText = getTemplateChips(candidate).map(c => c.title).join(' ');
+      if (/피드형|스퀘어형|배너형/.test(chipText)) return true;
+      const field = candidate.closest('[id], .NodeProxy-module_column__2MYFU, .ad-cms-form-item');
+      return /소재\s*유형/.test(normalizeText(field?.textContent || ''));
+    }) || null;
   }
 
   function getTemplateChips(select) {
-    return Array.from((select || document).querySelectorAll('.ad-cms-select-selection-item')).map(el => ({
+    if (!select) return [];
+    return Array.from(select.querySelectorAll('.ad-cms-select-selection-item')).map(el => ({
       el,
       title: el.getAttribute('title')
         || (el.querySelector('.ad-cms-select-selection-item-content')?.textContent || '').trim(),
@@ -1418,12 +1476,13 @@
   }
 
   async function ensureCreativeTemplates(keepLabels) {
-    const select = findTemplateSelect();
+    let select = findTemplateSelect();
     if (!select) return { removed: [], added: [], failed: [], missing: keepLabels.slice(), error: '소재 유형 셀렉트 못찾음' };
 
     const removed = [];
     const added = [];
     const failed = [];
+    const attemptedRemovals = new Set();
 
     // 0) 이 광고그룹이 배너형을 지원하는지 먼저 확인.
     //    지원 안 하는데 기존 칩부터 지우면 소재 유형이 0개가 돼 폼이 망가짐.
@@ -1441,9 +1500,21 @@
 
     // 1) keep 목록에 없는 칩 제거 (한 번에 하나씩 — 제거하면 확인 다이얼로그 + DOM 재배열)
     for (let round = 0; round < 12; round++) {
+      // 칩 변경을 확인하면 GFA가 셀렉트 전체를 다시 그린다. 이전 select를 계속
+      // 사용하면 분리된 DOM의 X 버튼을 반복 클릭하므로 매 회 현재 DOM을 다시 찾는다.
+      select = findTemplateSelect();
+      if (!select) {
+        failed.push('소재 유형 셀렉트 재탐색 실패');
+        break;
+      }
       const extra = getTemplateChips(select)
         .find(c => !keepLabels.some(label => chipLabelMatches(c.title, label)));
       if (!extra) break;
+      const removalKey = normalizeChipLabel(extra.title);
+      if (attemptedRemovals.has(removalKey)) {
+        failed.push(`${extra.title} (제거 후 다시 나타남)`);
+        break; // GFA가 값을 되돌린 경우 같은 칩을 계속 토글하지 않는다.
+      }
       const removeBtn = extra.el.querySelector(
         '.ad-cms-select-selection-item-remove, [aria-label="close"], [aria-label="Close"], .anticon-close'
       );
@@ -1451,20 +1522,35 @@
         failed.push(`${extra.title} (X 버튼 없음)`);
         break; // 못 지우면 같은 칩이 계속 걸려 무한루프
       }
+      attemptedRemovals.add(removalKey);
       lastChipRemoveAt = Date.now(); // 구성 변경 다이얼로그 자동 확인 가드
       clickLikeUser(removeBtn);
+      const didRemove = await waitFor(() => {
+        const liveSelect = findTemplateSelect();
+        return !!liveSelect && !getTemplateChips(liveSelect)
+          .some(c => chipLabelMatches(c.title, extra.title));
+      }, 5000, 80);
+      if (!didRemove) {
+        failed.push(`${extra.title} (제거 확인 실패)`);
+        break; // 상태가 그대로면 같은 칩을 다시 누르지 않는다.
+      }
       removed.push(extra.title);
-      await waitFor(() => !document.contains(extra.el), 2500, 80);
       await sleep(120);
     }
 
     // 2) 빠진 칩 추가
     for (const label of keepLabels) {
+      select = findTemplateSelect();
+      if (!select) {
+        failed.push(`${label} (소재 유형 셀렉트 재탐색 실패)`);
+        break;
+      }
       if (getTemplateChips(select).some(c => chipLabelMatches(c.title, label))) continue;
-      if (await addTemplateChip(select, label)) added.push(label);
+      if (await addTemplateChip(label)) added.push(label);
       else failed.push(`${label} (옵션 선택 실패)`);
     }
 
+    select = findTemplateSelect();
     const current = getTemplateChips(select).map(c => c.title);
     const missing = keepLabels.filter(label =>
       !current.some(title => chipLabelMatches(title, label)));
@@ -1495,7 +1581,9 @@
     return labels;
   }
 
-  async function addTemplateChip(select, label) {
+  async function addTemplateChip(label) {
+    let select = findTemplateSelect();
+    if (!select) return false;
     const searchInput = select.querySelector('input.ad-cms-select-input');
     clickLikeUser(searchInput || select);
 
@@ -1512,14 +1600,17 @@
         lastChipRemoveAt = Date.now(); // 구성 변경 다이얼로그 자동 확인 가드
         clickLikeUser(option);
         const ok = await waitFor(
-          () => getTemplateChips(select).some(c => chipLabelMatches(c.title, label)), 3000, 80);
-        closeSelectDropdown(searchInput || select);
+          () => getTemplateChips(findTemplateSelect())
+            .some(c => chipLabelMatches(c.title, label)), 5000, 80);
+        select = findTemplateSelect();
+        closeSelectDropdown(select?.querySelector('input.ad-cms-select-input') || select);
         await sleep(150);
         return ok;
       }
       await sleep(120);
     }
-    closeSelectDropdown(searchInput || select);
+    select = findTemplateSelect();
+    closeSelectDropdown(select?.querySelector('input.ad-cms-select-input') || select);
     return false;
   }
 
@@ -1984,7 +2075,24 @@
     return document.querySelectorAll('[role="dialog"], [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"], [class*="popup"], [class*="Popup"]');
   }
   function findConfirmButton(dlg) {
-    return Array.from(dlg.querySelectorAll('button')).find(b => /^확인$/.test((b.textContent || '').trim()));
+    return Array.from(dlg.querySelectorAll('button'))
+      .find(b => /^확인$/.test((b.textContent || '').trim()) && !b.disabled);
+  }
+
+  // 닫힌 Ant 모달은 DOM에 그대로 남고 wrap만 display:none 이 된다.
+  // 이걸 걸러내지 않으면 폴링이 "숨은 확인 버튼"을 계속 다시 눌러서
+  // 같은 변경이 반복 적용되고 소재 유형 칩이 왔다갔다 한다.
+  function isDialogVisible(dlg) {
+    if (!dlg || !dlg.isConnected) return false;
+    const rect = dlg.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return false; // 조상이 display:none 이면 0
+    // opacity는 열림/닫힘 애니메이션 중에 0을 지나가므로 판정에 쓰지 않는다.
+    let el = dlg;
+    for (let d = 0; d < 8 && el; d++, el = el.parentElement) {
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+    }
+    return true;
   }
 
   let dismissedCount = 0;
@@ -1992,39 +2100,57 @@
   let activePayload = null; // 이 탭이 맡은 소재 (저장 전 검증에 사용)
   let startRequested = false; // 백그라운드가 "이 탭 차례" 신호를 보냈는지
 
-  function tryDismissDialog(dlg) {
-    const txt = (dlg.textContent || '');
-    // 1) 권한 다이얼로그 — 항상 처리
-    if (/권한이?\s*없습니다|계정\s*권한/.test(txt)) {
-      const btn = findConfirmButton(dlg);
-      if (btn) {
-        btn.click();
-        dismissedCount++;
-        console.log('[GFA Helper] 권한 다이얼로그 닫음 #' + dismissedCount);
-        return true;
-      }
-    }
+  // 다이얼로그 확인은 "우리 조작 1건당 1번"이 원칙.
+  // 같은 다이얼로그가 root/wrap/header 등 중첩 노드로 셀렉터에 여러 번 걸리고,
+  // React가 닫는 데 시간이 걸리는 동안 폴러도 계속 돈다. 노드 단위로 기록하면
+  // 중첩 노드마다 한 번씩 눌러 같은 변경이 여러 번 적용된다(칩이 왔다갔다 하는 원인).
+  // 그래서 "조작 시각(actionAt)" 단위로 기록한다 — 라디오/칩 클릭 1번 = 확인 1번.
+  const confirmTracker = {};
+  const CONFIRM_RETRY_MS = 2000;
+  const CONFIRM_MAX_TRIES = 2; // 첫 클릭이 씹혀 계속 떠 있으면 2초 뒤 딱 한 번 더
+
+  function classifyDialog(txt) {
+    // 1) 권한 다이얼로그 — 항상 처리 (쿨다운만 적용)
+    if (/권한이?\s*없습니다|계정\s*권한/.test(txt)) return { kind: '권한', actionAt: 0 };
     // 2) 소재 타입 변경 확인 — 우리 라디오 클릭 후 5초 내
     if (/소재\s*타입.*변경/.test(txt) && Date.now() - lastTypeClickAt <= 5000) {
-      const btn = findConfirmButton(dlg);
-      if (btn) {
-        btn.click();
-        dismissedCount++;
-        console.log('[GFA Helper] 소재타입 변경 다이얼로그 닫음 #' + dismissedCount);
-        return true;
-      }
+      return { kind: '소재타입 변경', actionAt: lastTypeClickAt };
     }
-    // 3) 소재 구성 유형 변경 (칩 제거 시) — 우리 칩 제거 후 5초 내
-    if (/소재\s*구성\s*유형.*변경/.test(txt) && Date.now() - lastChipRemoveAt <= 5000) {
-      const btn = findConfirmButton(dlg);
-      if (btn) {
-        btn.click();
-        dismissedCount++;
-        console.log('[GFA Helper] 소재 구성 유형 변경 다이얼로그 닫음 #' + dismissedCount);
-        return true;
-      }
+    // 3) 소재 (구성) 유형 변경 — 우리 칩 조작 후 5초 내
+    if (/소재\s*(구성\s*)?유형.*변경/.test(txt) && Date.now() - lastChipRemoveAt <= 5000) {
+      return { kind: '소재 구성 유형 변경', actionAt: lastChipRemoveAt };
     }
-    return false;
+    return null;
+  }
+
+  function tryDismissDialog(dlg) {
+    // 숨겨진(=이미 닫힌) 다이얼로그는 건드리지 않는다.
+    if (!isDialogVisible(dlg)) return false;
+    const match = classifyDialog(dlg.textContent || '');
+    if (!match) return false;
+
+    const tr = confirmTracker[match.kind]
+      || (confirmTracker[match.kind] = { actionAt: -1, clickAt: 0, tries: 0 });
+    if (match.kind === '권한') {
+      // 권한 다이얼로그는 언제든 다시 뜰 수 있으니 횟수 제한 없이 쿨다운만
+      if (Date.now() - tr.clickAt < CONFIRM_RETRY_MS) return false;
+    } else if (tr.actionAt === match.actionAt) {
+      // 이 조작(라디오/칩 클릭)에 대한 확인은 이미 눌렀다 — 아직 떠 있으면 제한적 재시도
+      if (tr.tries >= CONFIRM_MAX_TRIES) return false;
+      if (Date.now() - tr.clickAt < CONFIRM_RETRY_MS) return false;
+    } else {
+      tr.actionAt = match.actionAt;
+      tr.tries = 0;
+    }
+
+    const btn = findConfirmButton(dlg);
+    if (!btn) return false;
+    tr.clickAt = Date.now();
+    tr.tries++;
+    btn.click();
+    dismissedCount++;
+    console.log(`[GFA Helper] ${match.kind} 다이얼로그 닫음 #${dismissedCount}`);
+    return true;
   }
 
   function watchDialogs() {
