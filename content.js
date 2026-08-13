@@ -230,9 +230,12 @@
         // 다이얼로그가 뜨고 자동으로 닫히고 라디오에 반영될 때까지 — 되는 즉시 진행
         if (await waitFor(() => best.checked, 1600, 80)) { clicked = true; break; }
 
-        // 라디오 click이 안 먹으면 부모 카드 클릭
+        // 라디오 click이 안 먹으면 부모 카드 클릭.
+        // 단, 다른 소재 타입 라디오까지 품은 컨테이너를 누르면 엉뚱한 타입이
+        // 선택돼 화면상 타입이 왔다갔다 한다 — 내 라디오만 든 조상까지만 올라간다.
         let p = best.parentElement;
         for (let d = 0; d < 4 && p && !clicked; d++, p = p.parentElement) {
+          if (p.querySelectorAll('input[type="radio"]').length > 1) break;
           lastTypeClickAt = Date.now();
           p.click();
           if (await waitFor(() => best.checked, 900, 80)) { clicked = true; break; }
@@ -2112,14 +2115,20 @@
   function classifyDialog(txt) {
     // 1) 권한 다이얼로그 — 항상 처리 (쿨다운만 적용)
     if (/권한이?\s*없습니다|계정\s*권한/.test(txt)) return { kind: '권한', actionAt: 0 };
-    // 2) 소재 타입 변경 확인 — 우리 라디오 클릭 후 5초 내
-    if (/소재\s*타입.*변경/.test(txt) && Date.now() - lastTypeClickAt <= 5000) {
-      return { kind: '소재타입 변경', actionAt: lastTypeClickAt };
-    }
-    // 3) 소재 (구성) 유형 변경 — 우리 칩 조작 후 5초 내
-    if (/소재\s*(구성\s*)?유형.*변경/.test(txt) && Date.now() - lastChipRemoveAt <= 5000) {
+
+    // 2) 변경 확인 다이얼로그.
+    //    GFA가 "소재 타입" / "소재 유형" / "소재 구성 유형" 중 무엇으로 쓰는지에
+    //    의존하면, 문구가 조금만 달라도 확인이 안 눌려 라디오·칩 클릭만 반복된다.
+    //    문구 대신 "직전에 우리가 무엇을 눌렀는지"로 판별한다.
+    if (!/소재.*(타입|유형).*변경|변경.*(초기화|삭제)/.test(txt)) return null;
+    const sinceType = Date.now() - lastTypeClickAt;
+    const sinceChip = Date.now() - lastChipRemoveAt;
+    const typeOk = lastTypeClickAt > 0 && sinceType <= 5000;
+    const chipOk = lastChipRemoveAt > 0 && sinceChip <= 5000;
+    if (chipOk && (!typeOk || sinceChip <= sinceType)) {
       return { kind: '소재 구성 유형 변경', actionAt: lastChipRemoveAt };
     }
+    if (typeOk) return { kind: '소재타입 변경', actionAt: lastTypeClickAt };
     return null;
   }
 
