@@ -21,7 +21,15 @@
     setter.call(el, value);
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
-    el.dispatchEvent(new Event('blur', { bubbles: true }));
+    // blur는 여기서 쏘지 않는다 — 폼이 다시 그려지는 동안 반복 호출되면
+    // blur 검증이 초당 수 회 돌면서 GFA 상태 변동(칩 토글·값 초기화)을 계속 자극한다.
+    // 값이 확정된 뒤 commitBlur()로 한 번만 쏜다.
+  };
+
+  // 값 확정 후 1회만 blur — GFA가 blur 시점에 검증/반영하는 필드 대응
+  const commitBlur = (el) => {
+    if (!el) return;
+    try { el.dispatchEvent(new Event('blur', { bubbles: true })); } catch (e) { /* noop */ }
   };
 
   // ============================================================
@@ -95,6 +103,57 @@
     el.dispatchEvent(new PointerEvent('pointerup', opts));
     el.dispatchEvent(new MouseEvent('mouseup', opts));
     el.click();
+  }
+
+  // ============================================================
+  // 소재 유형(템플릿) 칩 변동 감시
+  // 칩 구성이 바뀌면 폼 전체가 다시 그려진다. 그 중에 입력·클릭을 밀어 넣으면
+  // 값이 날아가고, 우리가 쏜 이벤트가 다시 GFA 상태 변동을 자극해 칩이
+  // 무한 토글되기도 한다 (영상 확인: 배너형(모바일) 칩이 ~1초 주기로 반복 토글).
+  //   1) 칩이 바뀐 직후에는 잠잠해질 때까지 기다렸다 진행
+  //   2) 짧은 시간에 여러 번 바뀌면(churn) 입력을 아예 멈춤
+  // ============================================================
+  const chipFlips = []; // {at, from, to}
+  let lastChipSignature = null;
+
+  function getChipSignature() {
+    try {
+      const select = findTemplateSelect();
+      if (!select) return '';
+      return getTemplateChips(select).map(c => c.title).join('|');
+    } catch (e) { return ''; }
+  }
+
+  function noteChipSignature() {
+    const sig = getChipSignature();
+    if (lastChipSignature === null) { lastChipSignature = sig; return; }
+    if (sig !== lastChipSignature) {
+      chipFlips.push({ at: Date.now(), from: lastChipSignature, to: sig });
+      if (chipFlips.length > 40) chipFlips.shift();
+      console.warn(`[GFA Helper] 소재 유형 변동 #${chipFlips.length}: [${lastChipSignature}] → [${sig}]`);
+      lastChipSignature = sig;
+    }
+  }
+
+  function lastChipFlipAt() {
+    return chipFlips.length ? chipFlips[chipFlips.length - 1].at : 0;
+  }
+
+  // 최근 4초 안에 3번 이상 바뀌었으면 "폼이 요동치는 중"
+  function isTemplateChurning() {
+    const cutoff = Date.now() - 4000;
+    return chipFlips.filter(f => f.at >= cutoff).length >= 3;
+  }
+
+  // 칩 구성이 stableMs 동안 그대로일 때까지 대기. 잠잠해지면 true.
+  async function waitForTemplatesCalm(maxMs = 8000, stableMs = 1000) {
+    const start = Date.now();
+    for (;;) {
+      noteChipSignature();
+      if (Date.now() - lastChipFlipAt() >= stableMs) return true;
+      if (Date.now() - start >= maxMs) return false;
+      await sleep(150);
+    }
   }
 
   // ============================================================
@@ -224,7 +283,10 @@
     if (!wasChecked) {
       // 최대 3회 재시도 — 백그라운드 탭에서 race 잘 잡기 위해
       let clicked = false;
+      pendingTypeRadio = best;
       for (let retry = 0; retry < 3 && !clicked; retry++) {
+        // 변경 확인 다이얼로그가 아직 떠 있는 동안 또 누르면 클릭이 겹쳐 상태가 꼬인다
+        await waitFor(() => !isChangeDialogVisible(), 1500, 100);
         lastTypeClickAt = Date.now();
         best.click();
         // 다이얼로그가 뜨고 자동으로 닫히고 라디오에 반영될 때까지 — 되는 즉시 진행
@@ -236,6 +298,7 @@
         let p = best.parentElement;
         for (let d = 0; d < 4 && p && !clicked; d++, p = p.parentElement) {
           if (p.querySelectorAll('input[type="radio"]').length > 1) break;
+          if (isChangeDialogVisible()) break; // 다이얼로그 처리 중 — 추가 클릭 금지
           lastTypeClickAt = Date.now();
           p.click();
           if (await waitFor(() => best.checked, 900, 80)) { clicked = true; break; }
@@ -332,9 +395,20 @@
   // ============================================================
   async function fillInputUntilStable(findEl, value, label, maxMs = 7000) {
     if (!value) return null;
-    const start = Date.now();
+    let deadline = Date.now() + maxMs;
     let lastEl = null;
-    while (Date.now() - start < maxMs) {
+    let reverts = 0; // 넣은 값이 폼 재렌더로 다시 비워진 횟수
+    while (Date.now() < deadline) {
+      // 소재 유형 칩이 바뀌는 중에는 입력하지 않는다 — 어차피 날아가고,
+      // 반복 입력 이벤트가 폼 변동을 계속 자극한다. 가라앉은 뒤 이어서 한다.
+      if (isTemplateChurning()) {
+        const calmed = await waitForTemplatesCalm(8000);
+        deadline = Date.now() + Math.max(2500, deadline - Date.now());
+        if (!calmed) {
+          console.warn(`[GFA Helper] ${label}: 소재 유형이 계속 바뀌어 입력 중단`);
+          return false;
+        }
+      }
       const el = findEl();
       if (el) {
         lastEl = el;
@@ -342,19 +416,32 @@
         await sleep(60);
         const current = el.value || '';
         if (current === value) {
-          flashEl(el);
-          return true;
+          // 폼 재렌더로 곧장 되돌아가는지 잠깐 지켜본 뒤 확정한다
+          await sleep(120);
+          const held = ((findEl() || el).value || '') === value;
+          if (held) {
+            commitBlur(findEl() || el);
+            flashEl(el);
+            return true;
+          }
+          reverts++;
+          if (reverts >= 4) {
+            console.warn(`[GFA Helper] ${label}: 입력값이 ${reverts}회 초기화됨 — 폼 불안정, 입력 중단`);
+            return false;
+          }
+          continue;
         }
       }
       await sleep(90);
     }
-    if (lastEl) {
+    if (lastEl && !isTemplateChurning()) {
       setReactValue(lastEl, value);
+      commitBlur(lastEl);
       flashEl(lastEl, '#f59e0b');
       await sleep(100);
       return (lastEl.value || '') === value;
     }
-    console.warn(`[GFA Helper] ${label} input 못찾음`);
+    if (!lastEl) console.warn(`[GFA Helper] ${label} input 못찾음`);
     return false;
   }
 
@@ -1212,6 +1299,9 @@
     const isShopping = !!d['쇼핑프로모션'];
     const isBannerTemplate = !!d['배너형'];
 
+    // 소재타입 전환 직후 폼이 아직 출렁이는 중이면 가라앉힌 뒤 칩을 만진다
+    await waitForTemplatesCalm(6000);
+
     // 소재 유형 칩을 건드리면 확인 다이얼로그가 뜨고 폼이 통째로 다시 그려진다.
     // 값을 넣은 뒤에 정리하면 그때 날아가므로 무조건 칩부터 확정한다.
     let chipResult;
@@ -1286,6 +1376,12 @@
     if (Array.isArray(d['ctaSlots']) && d['ctaSlots'].length > 0) {
       const slotResults = await fillCtaSlots(d['ctaSlots']);
       results['CTA슬롯'] = slotResults;
+    }
+
+    // 칩이 아직도 오락가락 중이면 사용자에게 알린다 (저장 검증에서도 한 번 더 막힘)
+    if (isTemplateChurning()) {
+      results['소재유형정리오류'] = [results['소재유형정리오류'], '소재 유형 칩이 계속 변동 중 — 저장 전 확인 필요']
+        .filter(Boolean).join(' / ');
     }
 
     // 이미지 모달·행동 유도 드롭다운을 거치며 값이 날아갔을 수 있으니 마지막에 전부 재확인
@@ -1377,6 +1473,8 @@
 
     // 여러 라운드 — 제거하면 다이얼로그 뜨고 DOM 재배열될 수 있어서 안전하게
     for (let round = 0; round < 10; round++) {
+      // 직전 제거의 재렌더가 아직 출렁이는 중이면 가라앉힌 뒤 조작한다
+      await waitForTemplatesCalm(6000, 800);
       const select = findTemplateSelect();
       if (!select) {
         failed.push('소재 유형 셀렉트 못찾음');
@@ -1408,6 +1506,12 @@
         // 클릭과 동시에 다이얼로그가 생길 수 있으므로 가드를 클릭 전에 설정한다.
         attemptedRemovals.add(removalKey);
         lastChipRemoveAt = Date.now();
+        // 확인 다이얼로그 재클릭 가드용 — 이 조작이 아직 미적용인지 (칩이 아직 남아있는지)
+        pendingChipUnapplied = () => {
+          const liveSelect = findTemplateSelect();
+          return !!liveSelect && getTemplateChips(liveSelect)
+            .some(c => normalize(c.title) === removalKey);
+        };
         if (clickRemove(chip)) {
           didRemove = true;
           // 하단 폼 전체가 다시 그려진 것만 보고 성공 처리하지 않고, 새 DOM에서
@@ -1418,6 +1522,17 @@
           }, 5000, 80);
           if (!didDisappear) {
             failed.push(`${title} (제거 확인 실패)`);
+            didRemove = false;
+            break;
+          }
+          // 사라진 직후 GFA가 되돌리는 경우가 있다 — 되살아나면 실패로 치고
+          // 같은 칩을 다시 건드리지 않는다 (토글 반복의 씨앗 차단)
+          const cameBack = await waitFor(() => {
+            const liveSelect = findTemplateSelect();
+            return !!liveSelect && getTemplateChips(liveSelect).some(c => normalize(c.title) === removalKey);
+          }, 1200, 120);
+          if (cameBack) {
+            failed.push(`${title} (제거 후 되살아남 — GFA가 되돌림)`);
             didRemove = false;
             break;
           }
@@ -1505,6 +1620,7 @@
     for (let round = 0; round < 12; round++) {
       // 칩 변경을 확인하면 GFA가 셀렉트 전체를 다시 그린다. 이전 select를 계속
       // 사용하면 분리된 DOM의 X 버튼을 반복 클릭하므로 매 회 현재 DOM을 다시 찾는다.
+      await waitForTemplatesCalm(6000, 800);
       select = findTemplateSelect();
       if (!select) {
         failed.push('소재 유형 셀렉트 재탐색 실패');
@@ -1527,6 +1643,11 @@
       }
       attemptedRemovals.add(removalKey);
       lastChipRemoveAt = Date.now(); // 구성 변경 다이얼로그 자동 확인 가드
+      pendingChipUnapplied = () => {
+        const liveSelect = findTemplateSelect();
+        return !!liveSelect && getTemplateChips(liveSelect)
+          .some(c => normalizeChipLabel(c.title) === removalKey);
+      };
       clickLikeUser(removeBtn);
       const didRemove = await waitFor(() => {
         const liveSelect = findTemplateSelect();
@@ -1536,6 +1657,16 @@
       if (!didRemove) {
         failed.push(`${extra.title} (제거 확인 실패)`);
         break; // 상태가 그대로면 같은 칩을 다시 누르지 않는다.
+      }
+      // 사라진 직후 되살아나면 GFA가 되돌린 것 — 같은 칩을 다시 건드리지 않는다
+      const cameBack = await waitFor(() => {
+        const liveSelect = findTemplateSelect();
+        return !!liveSelect && getTemplateChips(liveSelect)
+          .some(c => normalizeChipLabel(c.title) === removalKey);
+      }, 1200, 120);
+      if (cameBack) {
+        failed.push(`${extra.title} (제거 후 되살아남 — GFA가 되돌림)`);
+        break;
       }
       removed.push(extra.title);
       await sleep(120);
@@ -1601,6 +1732,9 @@
 
       if (option) {
         lastChipRemoveAt = Date.now(); // 구성 변경 다이얼로그 자동 확인 가드
+        // 추가 조작이 아직 미적용인지 = 칩이 아직 없는지
+        pendingChipUnapplied = () => !getTemplateChips(findTemplateSelect())
+          .some(c => chipLabelMatches(c.title, label));
         clickLikeUser(option);
         const ok = await waitFor(
           () => getTemplateChips(findTemplateSelect())
@@ -1686,11 +1820,13 @@
       const res = { idx: i + 1, text: false, url: false };
       if (tEl && slot.text) {
         setReactValue(tEl, slot.text);
+        commitBlur(tEl);
         flashEl(tEl);
         res.text = true;
       }
       if (uEl && slot.url) {
         setReactValue(uEl, slot.url);
+        commitBlur(uEl);
         flashEl(uEl);
         res.url = true;
       }
@@ -1927,6 +2063,9 @@
   }
 
   async function verifyAndRepairFields(d, { rounds = 2 } = {}) {
+    // 폼이 요동치는 중에 검증하면 "비었다 → 다시 채움 → 또 날아감"을 반복하며
+    // 폼 변동을 계속 자극한다. 가라앉은 다음에 확인한다.
+    await waitForTemplatesCalm(6000);
     const checks = collectFieldChecks(d);
     let bad = [];
     for (let round = 0; round <= rounds; round++) {
@@ -1936,10 +2075,12 @@
         return normalizeText(el.value || '') !== normalizeText(expectedValueFor(el, c.value));
       });
       if (!bad.length || round === rounds) break;
+      if (isTemplateChurning()) break; // 요동치는 폼에 반복 주입 금지 — 누락으로 보고
       for (const c of bad) {
         const el = c.find();
         if (!el) continue;
         setReactValue(el, expectedValueFor(el, c.value));
+        commitBlur(el);
         flashEl(el, '#f59e0b');
         await sleep(80);
       }
@@ -1960,6 +2101,19 @@
       const repair = await verifyAndRepairFields(d);
       if (!repair.ok) problems.push(`입력 누락: ${repair.missing.join(', ')}`);
       if (countPickedAdImages() === 0) problems.push('광고 이미지 없음');
+      // 소재 유형 칩이 의도와 다르면 GFA가 저장 시 엉뚱한 변형 소재까지 만든다
+      // (피드형 소재에 배너형 칩이 남아 있으면 배너형 소재가 같이 등록됨)
+      if (d['소재타입'] === 'native-image' && !d['쇼핑프로모션']) {
+        await waitForTemplatesCalm(4000);
+        const chipTitles = getTemplateChips(findTemplateSelect()).map(c => c.title);
+        const bannerChips = chipTitles.filter(t => /배너형/.test(t));
+        if (d['배너형']) {
+          if (chipTitles.length && !bannerChips.length) problems.push('소재 유형에 배너형 칩 없음');
+        } else if (bannerChips.length) {
+          problems.push(`소재 유형에 배너형 칩 남음: ${bannerChips.join(', ')}`);
+        }
+        if (isTemplateChurning()) problems.push('소재 유형이 계속 변동 중 — 페이지 새로고침 필요');
+      }
       if (problems.length && !force) {
         return { ok: false, error: problems.join(' / ') };
       }
@@ -2100,8 +2254,18 @@
 
   let dismissedCount = 0;
   let lastChipRemoveAt = 0; // 칩 제거 다이얼로그 자동 처리 가드
+  let pendingChipUnapplied = null; // 마지막 칩 조작이 아직 미적용인지 확인하는 프로브 (재확인 클릭 가드)
+  let pendingTypeRadio = null;     // 마지막으로 누른 소재타입 라디오 (재확인 클릭 가드)
   let activePayload = null; // 이 탭이 맡은 소재 (저장 전 검증에 사용)
   let startRequested = false; // 백그라운드가 "이 탭 차례" 신호를 보냈는지
+
+  // 변경 확인 다이얼로그가 화면에 떠 있는지 (라디오/칩 추가 클릭 억제용)
+  function isChangeDialogVisible() {
+    return Array.from(findDialogs()).some(dlg =>
+      isDialogVisible(dlg)
+      && !dlg.querySelector('input[name="creativeName"]')
+      && /소재.*(타입|유형).*변경|변경.*(초기화|삭제)/.test(dlg.textContent || ''));
+  }
 
   // 다이얼로그 확인은 "우리 조작 1건당 1번"이 원칙.
   // 같은 다이얼로그가 root/wrap/header 등 중첩 노드로 셀렉터에 여러 번 걸리고,
@@ -2135,18 +2299,35 @@
   function tryDismissDialog(dlg) {
     // 숨겨진(=이미 닫힌) 다이얼로그는 건드리지 않는다.
     if (!isDialogVisible(dlg)) return false;
+    // 소재 입력 폼을 품은 노드는 다이얼로그가 아니라 페이지/폼 컨테이너 오탐 —
+    // 여기의 "확인"류 버튼을 누르면 엉뚱한 변경이 적용된다.
+    if (dlg.querySelector('input[name="creativeName"]')) return false;
     const match = classifyDialog(dlg.textContent || '');
     if (!match) return false;
 
     const tr = confirmTracker[match.kind]
       || (confirmTracker[match.kind] = { actionAt: -1, clickAt: 0, tries: 0 });
     if (match.kind === '권한') {
-      // 권한 다이얼로그는 언제든 다시 뜰 수 있으니 횟수 제한 없이 쿨다운만
+      // 권한 다이얼로그는 다시 뜰 수 있어 쿨다운만 두되, 상시 노출 문구를
+      // 다이얼로그로 오인해 영원히 누르는 일은 막는다 (페이지당 5회 상한)
+      if (tr.tries >= 5) return false;
       if (Date.now() - tr.clickAt < CONFIRM_RETRY_MS) return false;
     } else if (tr.actionAt === match.actionAt) {
       // 이 조작(라디오/칩 클릭)에 대한 확인은 이미 눌렀다 — 아직 떠 있으면 제한적 재시도
       if (tr.tries >= CONFIRM_MAX_TRIES) return false;
       if (Date.now() - tr.clickAt < CONFIRM_RETRY_MS) return false;
+      // 재확인은 "첫 클릭이 정말 안 먹었을 때"만 한다. GFA는 확인을 누를 때마다
+      // 변경을 다시 적용하므로, 이미 적용된 조작에 또 누르면 칩/타입이 토글된다.
+      if (match.kind === '소재 구성 유형 변경') {
+        let unapplied = false;
+        try { unapplied = pendingChipUnapplied ? !!pendingChipUnapplied() : false; } catch (e) { unapplied = false; }
+        if (!unapplied) { tr.tries = CONFIRM_MAX_TRIES; return false; }
+      }
+      if (match.kind === '소재타입 변경') {
+        // 라디오 노드가 교체(재렌더)됐으면 적용된 것으로 보고 다시 누르지 않는다
+        const applied = !!pendingTypeRadio && (!pendingTypeRadio.isConnected || pendingTypeRadio.checked);
+        if (applied) { tr.tries = CONFIRM_MAX_TRIES; return false; }
+      }
     } else {
       tr.actionAt = match.actionAt;
       tr.tries = 0;
@@ -2223,6 +2404,10 @@
     activePayload = payload; // 저장 직전 검증에서 다시 씀
     if (PACE_FACTORS[payload.pace]) paceFactor = PACE_FACTORS[payload.pace];
 
+    // 소재 유형 칩 변동 추적 시작 — 진단 로그 + 입력 가드(waitForTemplatesCalm)의 데이터원
+    noteChipSignature();
+    setInterval(noteChipSignature, 250);
+
     // 2) 이 탭이 화면에 올라올 때까지 대기 (숨은 탭은 타이머가 늦어 일을 못 함)
     await waitUntilVisible();
 
@@ -2260,7 +2445,7 @@
     if (msg.type === 'fillFocused') {
       const el = getTargetEl();
       if (!el) { sendResponse({ ok: false, error: '입력칸 포커스 필요' }); return; }
-      try { setReactValue(el, msg.value ?? ''); flashEl(el); sendResponse({ ok: true }); }
+      try { setReactValue(el, msg.value ?? ''); commitBlur(el); flashEl(el); sendResponse({ ok: true }); }
       catch (e) { sendResponse({ ok: false, error: String(e) }); }
       return;
     }
