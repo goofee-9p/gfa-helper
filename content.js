@@ -1616,7 +1616,23 @@
       }
     }
 
-    // 1) keep 목록에 없는 칩 제거 (한 번에 하나씩 — 제거하면 확인 다이얼로그 + DOM 재배열)
+    // 1) 빠진 칩부터 추가한다.
+    //    제거를 먼저 하면, 기존 칩이 1개뿐인 광고그룹(예: 피드형만)에서
+    //    소재 유형이 0개가 되는 제거라서 GFA가 "소재 구성 유형은 반드시
+    //    1가지 이상 선택해 주세요" 다이얼로그로 거부한다 (342×228에서 재현).
+    //    추가를 먼저 해 두면 제거는 항상 1개 이상 남는 상태에서 이뤄진다.
+    for (const label of keepLabels) {
+      select = findTemplateSelect();
+      if (!select) {
+        failed.push(`${label} (소재 유형 셀렉트 재탐색 실패)`);
+        break;
+      }
+      if (getTemplateChips(select).some(c => chipLabelMatches(c.title, label))) continue;
+      if (await addTemplateChip(label)) added.push(label);
+      else failed.push(`${label} (옵션 선택 실패)`);
+    }
+
+    // 2) keep 목록에 없는 칩 제거 (한 번에 하나씩 — 제거하면 확인 다이얼로그 + DOM 재배열)
     for (let round = 0; round < 12; round++) {
       // 칩 변경을 확인하면 GFA가 셀렉트 전체를 다시 그린다. 이전 select를 계속
       // 사용하면 분리된 DOM의 X 버튼을 반복 클릭하므로 매 회 현재 DOM을 다시 찾는다.
@@ -1626,9 +1642,15 @@
         failed.push('소재 유형 셀렉트 재탐색 실패');
         break;
       }
-      const extra = getTemplateChips(select)
+      const chips = getTemplateChips(select);
+      const extra = chips
         .find(c => !keepLabels.some(label => chipLabelMatches(c.title, label)));
       if (!extra) break;
+      // 마지막 남은 칩 제거는 GFA가 거부한다 — 시도 자체를 안 한다
+      if (chips.length <= 1) {
+        failed.push(`${extra.title} (마지막 소재 유형이라 제거 안 함)`);
+        break;
+      }
       const removalKey = normalizeChipLabel(extra.title);
       if (attemptedRemovals.has(removalKey)) {
         failed.push(`${extra.title} (제거 후 다시 나타남)`);
@@ -1670,18 +1692,6 @@
       }
       removed.push(extra.title);
       await sleep(120);
-    }
-
-    // 2) 빠진 칩 추가
-    for (const label of keepLabels) {
-      select = findTemplateSelect();
-      if (!select) {
-        failed.push(`${label} (소재 유형 셀렉트 재탐색 실패)`);
-        break;
-      }
-      if (getTemplateChips(select).some(c => chipLabelMatches(c.title, label))) continue;
-      if (await addTemplateChip(label)) added.push(label);
-      else failed.push(`${label} (옵션 선택 실패)`);
     }
 
     select = findTemplateSelect();
@@ -2109,6 +2119,9 @@
         const bannerChips = chipTitles.filter(t => /배너형/.test(t));
         if (d['배너형']) {
           if (chipTitles.length && !bannerChips.length) problems.push('소재 유형에 배너형 칩 없음');
+          // 피드형 등이 남은 채 저장하면 그 유형의 변형 소재까지 같이 등록된다
+          const extras = chipTitles.filter(t => !/배너형/.test(t));
+          if (extras.length) problems.push(`소재 유형에 배너형 외 칩 남음: ${extras.join(', ')}`);
         } else if (bannerChips.length) {
           problems.push(`소재 유형에 배너형 칩 남음: ${bannerChips.join(', ')}`);
         }
@@ -2279,6 +2292,17 @@
   function classifyDialog(txt) {
     // 1) 권한 다이얼로그 — 항상 처리 (쿨다운만 적용)
     if (/권한이?\s*없습니다|계정\s*권한/.test(txt)) return { kind: '권한', actionAt: 0 };
+
+    // 1.5) "소재 구성 유형은 반드시 1가지 이상 선택해 주세요" — 제거 거부 안내.
+    //      여기의 확인은 변경 적용이 아니라 단순 닫기라 안전하다.
+    //      우리가 칩을 조작한 직후에 뜬 것만 닫는다 (사용자 수동 작업 존중).
+    if (/소재\s*(구성\s*)?유형/.test(txt) && /(1|한)\s*가지\s*이상\s*선택/.test(txt)) {
+      const sinceChip = Date.now() - lastChipRemoveAt;
+      if (lastChipRemoveAt > 0 && sinceChip <= 8000) {
+        return { kind: '소재 구성 최소 안내', actionAt: lastChipRemoveAt };
+      }
+      return null;
+    }
 
     // 2) 변경 확인 다이얼로그.
     //    GFA가 "소재 타입" / "소재 유형" / "소재 구성 유형" 중 무엇으로 쓰는지에
